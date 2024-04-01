@@ -1,6 +1,7 @@
 import os
 import hashlib
 import tempfile
+import therock
 from pathlib import Path
 from triton.runtime.build import _build
 from triton.runtime.cache import get_cache_manager
@@ -8,9 +9,7 @@ from triton.backends.driver import GPUDriver
 
 dirname = os.path.dirname(os.path.realpath(__file__))
 include_dir = [os.path.join(dirname, "include")]
-library_dir = [os.path.join(dirname, "lib")]
-include_dir.insert(0, "/opt/rocm/include")
-library_dir.insert(0, "/opt/rocm/lib")
+library_dir = [therock.get_library_dir()]
 libraries = ['amdhip64']
 
 
