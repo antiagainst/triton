@@ -44,8 +44,9 @@ namespace proton {
 
 struct ExternLibBase {
   using RetType = int; // Generic type, can be overridden in derived structs
-  static constexpr const char *name = ""; // Placeholder
-  static constexpr RetType success = 0;   // Placeholder
+  static constexpr const char *name = "";    // Placeholder
+  static constexpr const char *envName = ""; // Placeholder
+  static constexpr RetType success = 0;      // Placeholder
   ExternLibBase() = delete;
   ExternLibBase(const ExternLibBase &) = delete;
   ExternLibBase &operator=(const ExternLibBase &) = delete;
@@ -61,14 +62,23 @@ public:
       // First reuse the existing handle
       *lib = dlopen(name, RTLD_NOLOAD);
     }
+
+    // Compose the dedicated environment variable used to control which shared
+    // library to load
+    std::string envName = std::string("TRITON_") + ExternLib::envName + "_PATH";
+
     if (*lib == nullptr) {
       // If not found, try to load it
+      const char *envPath = std::getenv(envName.c_str());
+      if (envPath) {
+        name = envPath;
+      }
       *lib = dlopen(name, RTLD_LOCAL | RTLD_LAZY);
     }
     if (*lib == nullptr) {
       throw std::runtime_error("Could not find `" + std::string(name) +
-                               "`. Make sure it is in your "
-                               "LD_LIBRARY_PATH.");
+                               "`. You can specify the path to it with " +
+                               envName + ".");
     }
   }
 
