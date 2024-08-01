@@ -1,14 +1,15 @@
-#include <memory>
-#include <numeric>
-
-#include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "mlir/Transforms/Passes.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include <numeric>
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "thread-locality"
 
 namespace mlir {
 namespace triton {
@@ -105,6 +106,9 @@ class TritonGPUOptimizeThreadLocalityPass
             .failed()) {
       signalPassFailure();
     }
+
+    SmallVector<triton::ReduceOp> allReduceOps;
+    mod.walk([&](triton::ReduceOp reduce) { allReduceOps.push_back(reduce); });
 
     DenseSet<triton::ReduceOp> reduceOps;
     mod.walk([&](triton::ReduceOp reduce) -> void {
@@ -225,6 +229,41 @@ class TritonGPUOptimizeThreadLocalityPass
       // cleanup
       oldYield.erase();
       forOp.erase();
+    }
+
+    for (triton::ReduceOp reduce : allReduceOps) {
+      LLVM_DEBUG(llvm::dbgs() << "current reduce op: " << reduce << "\n");
+      if (reduceOps.contains(reduce)) {
+        LLVM_DEBUG(llvm::dbgs() << "skipping - processed\n");
+        continue;
+      }
+      if (reduce.getNumOperands() != 1 || reduce.getNumResults() != 1) {
+        LLVM_DEBUG(llvm::dbgs() << "skipping - more than 1 input/output\n");
+        continue;
+      }
+
+      Attribute newLayout = getOneWarpReductionEncoding(reduce);
+      if (!newLayout) {
+        LLVM_DEBUG(llvm::dbgs() << "skipping - cannot deduce layout\n");
+        continue;
+      }
+
+      Value input = reduce.getOperands()[0];
+      auto srcType = cast<RankedTensorType>(input.getType());
+      ArrayRef<int64_t> shape = srcType.getShape();
+
+      builder.setInsertionPoint(reduce);
+      RankedTensorType newType =
+          RankedTensorType::get(shape, srcType.getElementType(), newLayout);
+      auto cvtSrc = builder.create<mlir::triton::gpu::ConvertLayoutOp>(
+          reduce.getLoc(), newType, input);
+      IRMapping mapping;
+      mapping.map(reduce.getOperands()[0], cvtSrc);
+      Operation *newReduce = cloneWithInferType(builder, reduce, mapping);
+      newReduce->setAttr("preserve_layout", builder.getUnitAttr());
+      auto cvtDst = createConvertLayout(builder, reduce.getType(0), newReduce);
+      reduce.replaceAllUsesWith(cvtDst);
+      reduce.erase();
     }
   };
 
@@ -413,6 +452,45 @@ private:
         reduce.getContext(), sizePerThread3d, threadsPerWarp3d, warsPerCTA3d,
         order3d, ctaLayout3d);
     return blocked3d;
+  }
+
+  Attribute getOneWarpReductionEncoding(triton::ReduceOp reduce) const {
+    auto srcType = cast<RankedTensorType>(reduce.getOperands()[0].getType());
+    auto srcEncoding = srcType.getEncoding();
+    auto blocked = dyn_cast<triton::gpu::BlockedEncodingAttr>(srcEncoding);
+
+    ArrayRef<int64_t> shape = srcType.getShape();
+    auto warpsPerCTA = llvm::to_vector(blocked.getWarpsPerCTA());
+    int64_t totalWarps = product(warpsPerCTA);
+    int64_t totalParallelDims =
+        srcType.getNumElements() / shape[reduce.getAxis()];
+    LLVM_DEBUG(llvm::dbgs() << "totalWarps = " << totalWarps << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "totalParallelDims = " << totalParallelDims << "\n");
+    if (totalParallelDims % totalWarps != 0) {
+      LLVM_DEBUG(llvm::dbgs() << "skipping - shape not aligned\n");
+      return nullptr;
+    }
+    for (int dim : blocked.getOrder()) {
+      if (dim == reduce.getAxis()) {
+        warpsPerCTA[dim] = 1;
+      } else {
+        warpsPerCTA[dim] = std::gcd(totalWarps, shape[dim]);
+        totalWarps /= warpsPerCTA[dim];
+      }
+    }
+      LLVM_DEBUG({
+          llvm::dbgs() << "deduced warps per CTA: ";
+          llvm::interleaveComma(warpsPerCTA, llvm::dbgs());
+      });
+    if (totalWarps != 1) {
+      LLVM_DEBUG(llvm::dbgs() << "remaining totalWarps = " << totalParallelDims << "\n");
+      return nullptr;
+    }
+
+    return triton::gpu::BlockedEncodingAttr::get(
+        reduce.getContext(), blocked.getSizePerThread(),
+        blocked.getThreadsPerWarp(), warpsPerCTA, blocked.getOrder(),
+        blocked.getCTALayout());
   }
 
   template <typename T>
