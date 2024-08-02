@@ -3,6 +3,7 @@
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
@@ -16,6 +17,7 @@
 #include "mlir/Transforms/RegionUtils.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/Triton/IR/Traits.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
@@ -300,18 +302,33 @@ void LayoutPropagation::initAnchorLayout() {
 void LayoutPropagation::setEncoding(ValueRange values, LayoutInfo &info,
                                     SmallVector<Value> &changed,
                                     Operation *op) {
+  LLVM_DEBUG(llvm::dbgs() << "set encoding for op: " << *op << "\n");
   for (Value value : values) {
     if (!isa<RankedTensorType>(value.getType()))
       continue;
+    LLVM_DEBUG(llvm::dbgs() << "look at value: " << value << "\n");
     bool hasChanged = false;
     for (auto encoding : info.encodings) {
+      LLVM_DEBUG(llvm::dbgs() << "look at encoding: " << encoding << "\n");
       std::optional<Attribute> dstEncoding;
       if (isa<ConvertLayoutOp>(op)) {
+        LLVM_DEBUG(llvm::dbgs() << "this is convert op; directly use encoding: " << encoding);
         // Try to remove the convert by making the dst encoding match the source
         // encoding.
         dstEncoding = encoding;
       } else {
         dstEncoding = inferDstEncoding(op, encoding);
+        
+      if (op->hasTrait<mlir::OpTrait::SameLoadStoreOperandsAndResultEncoding>()) {
+        LLVM_DEBUG(llvm::dbgs() << "op has trait: SameLoadStoreOperandsAndResultEncoding ");
+      }
+      /*
+      if (op->hasTrait<mlir::OpTrait::SameLoadStoreOperandsEncoding>()) {
+        LLVM_DEBUG(llvm::dbgs() << "op has trait: SameLoadStoreOperandsEncoding ");
+        dstEncoding = encoding;
+      }
+      */
+        LLVM_DEBUG(llvm::dbgs() << "inferred encoding: " << dstEncoding);
       }
       if (dstEncoding)
         hasChanged |= layouts[value].encodings.insert(*dstEncoding);
@@ -320,6 +337,7 @@ void LayoutPropagation::setEncoding(ValueRange values, LayoutInfo &info,
       changed.push_back(value);
   }
 }
+
 
 SmallVector<Value> LayoutPropagation::propagateToUsers(Value value,
                                                        LayoutInfo &info) {
@@ -368,6 +386,13 @@ SmallVector<Value> LayoutPropagation::propagateToUsers(Value value,
       setEncoding(user->getResults(), info, changed, user);
       continue;
     }
+    /*
+    if (isStoreFromReduction(user)) {
+      setEncoding({cast<triton::StoreOp>(user).getPtr()}, info, changed, user);
+      continue;
+    }
+    */
+    LLVM_DEBUG(llvm::dbgs() << " no action on user: " << *user << "\n");
   }
   return changed;
 }
@@ -381,14 +406,14 @@ void LayoutPropagation::propagateLayout() {
     Value currentValue = queue.back();
     LayoutInfo info = layouts[currentValue];
     queue.pop_back();
-    SmallVector<Value> changed = propagateToUsers(currentValue, info);
-
     LLVM_DEBUG({
       DBGS() << "propagateLayout considering " << currentValue << ", which has "
              << info.encodings.size() << " candidate encoding(s):\n";
       for (Attribute encoding : info.encodings)
         DBGS() << "  " << encoding << "\n";
     });
+
+    SmallVector<Value> changed = propagateToUsers(currentValue, info);
 
     queue.insert(queue.end(), changed.begin(), changed.end());
   }
@@ -400,6 +425,7 @@ void LayoutPropagation::resolveConflicts() {
     LayoutInfo &info = it.second;
     if (info.encodings.size() <= 1)
       continue;
+    //LLVM_DEBUG(llvm::dbgs() << "resolving conflict on op: " << *op << "\n");
     // Hacky resolve, prefer block encoding.
     // TODO: add a proper heuristic.
     Attribute encoding = *info.encodings.begin();
@@ -408,6 +434,7 @@ void LayoutPropagation::resolveConflicts() {
     for (Attribute e : info.encodings) {
       if ((isLoadOrStore && isa<BlockedEncodingAttr>(e)) ||
           (!isLoadOrStore && isa<MmaEncodingTrait>(e))) {
+        LLVM_DEBUG(llvm::dbgs() << "chosing encoding: " << e << "\n");
         encoding = e;
         break;
       }
@@ -1199,6 +1226,32 @@ void hoistConvert(ModuleOp module) {
     layoutRemat.cleanup();
   });
 }
+
+struct MoveConvertFromStoreValueToPointer : OpRewritePattern<triton::StoreOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(triton::StoreOp storeOp,
+                                PatternRewriter &rewriter) const override {
+    if (!isStoreFromReduction(storeOp))
+      return failure();
+
+    auto valCvtOp = storeOp.getValue().getDefiningOp<ConvertLayoutOp>();
+    if (!valCvtOp)
+      return failure();
+    auto oldType = cast<RankedTensorType>(storeOp.getPtr().getType());
+    auto newType =
+        RankedTensorType::get(oldType.getShape(), oldType.getElementType(),
+                              valCvtOp.getSrc().getType().getEncoding());
+    auto ptrCvtOp = rewriter.create<mlir::triton::gpu::ConvertLayoutOp>(
+        valCvtOp.getLoc(), newType, storeOp.getPtr());
+
+    rewriter.replaceOpWithNewOp<triton::StoreOp>(
+        storeOp, ptrCvtOp, valCvtOp.getSrc(), storeOp.getMask(),
+        storeOp.getBoundaryCheck(), storeOp.getCache(), storeOp.getEvict());
+    return success();
+  }
+};
+  
 } // namespace
 
 class TritonGPURemoveLayoutConversionsPass
@@ -1231,6 +1284,17 @@ public:
 
     LLVM_DEBUG({
       DBGS() << "Module after canonicalizing:\n";
+      m.dump();
+    });
+
+    {
+      mlir::RewritePatternSet viewLayoutPatterns(&getContext());
+      viewLayoutPatterns.add<MoveConvertFromStoreValueToPointer>(&getContext());
+      if (failed(applyPatternsAndFoldGreedily(m, std::move(viewLayoutPatterns))))
+        signalPassFailure();
+    }
+    LLVM_DEBUG({
+      DBGS() << "Module after updating tt.store:\n";
       m.dump();
     });
 

@@ -5,6 +5,7 @@
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Analysis/AxisInfo.h"
@@ -503,7 +504,69 @@ std::optional<Attribute> inferDstEncoding(Operation *op, Attribute encoding) {
   return std::nullopt;
 }
 
+bool isLoadToReduction(Operation *op) {
+  if (!isa<triton::LoadOp>(op))
+    return false;
+
+  while (op && op->hasOneUse()) {
+    Operation *userOp = *op->getUsers().begin();
+    if (auto reduceOp = dyn_cast<triton::ReduceOp>(userOp))
+      return reduceOp->getAttrOfType<UnitAttr>("preserve_layout") != nullptr;
+
+    op = userOp;
+  }
+
+  return false;
+}
+
+bool isFromReduce(Value v) {
+  while (v) {
+    Operation *op = v.getDefiningOp();
+    if (!op)
+      return false;
+    if (auto reduceOp = dyn_cast<triton::ReduceOp>(op)) {
+      LLVM_DEBUG(llvm::dbgs() << "final -- reduce op" << *op << "\n");
+      return reduceOp->getAttrOfType<UnitAttr>("preserve_layout") != nullptr;
+    }
+
+    if (op->getNumOperands() == 1) {
+      v = op->getOperands()[0];
+      LLVM_DEBUG(llvm::dbgs() << "continue -- one input op: " << *op << "\n");
+    } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
+      int index = cast<OpResult>(v).getResultNumber();
+      v = cast<scf::YieldOp>(forOp.getBody()->getTerminator())
+              .getOperands()[index];
+      LLVM_DEBUG(llvm::dbgs() << "continue -- for op yielded value #" << index << "\n");
+    } else if (op->hasTrait<mlir::OpTrait::Elementwise>()) {
+      LLVM_DEBUG(llvm::dbgs() << "continue -- elementwise op" << *op << "\n");
+      for (Value operand : op->getOperands())
+        if (isFromReduce(operand))
+          return true;
+      return false;
+    } else {
+      LLVM_DEBUG(llvm::dbgs() << "skip -- unknown op: " << *op << "\n");
+      break;
+    }
+  }
+  return false;
+};
+
+bool isStoreFromReduction(Operation *op) {
+  Value value;
+  if (auto storeOp = dyn_cast<triton::StoreOp>(op))
+    value = storeOp.getValue();
+  else
+    return false;
+  LLVM_DEBUG(llvm::dbgs() << "looking at store: " << *op << "\n");
+  return isFromReduce(value);
+}
+
 bool isExpensiveLoadOrStore(Operation *op) {
+  if (isLoadToReduction(op))
+    return false;
+  if (isStoreFromReduction(op))
+    return false;
+
   // Case 1: Pointer of tensor is always expensive
   auto operandType = op->getOperand(0).getType();
   if (triton::isTensorPointerType(operandType))
