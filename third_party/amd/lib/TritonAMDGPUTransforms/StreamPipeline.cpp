@@ -266,11 +266,13 @@ LogicalResult LoopPipeliner::checkOpUses() {
       if (auto convertLayout = llvm::dyn_cast<ttg::ConvertLayoutOp>(use))
         if (auto tensorType =
                 dyn_cast<RankedTensorType>(convertLayout.getResult().getType()))
-          if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(
-                  tensorType.getEncoding())) {
-            isCandidate = true;
-            convertMapping[loadOp] = convertLayout;
-          }
+          if (cvtNeedsSharedMemory(convertLayout.getSrc().getType(),
+                                   tensorType))
+            if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(
+                    tensorType.getEncoding())) {
+              isCandidate = true;
+              convertMapping[loadOp] = convertLayout;
+            }
     } else
       isCandidate = false;
 

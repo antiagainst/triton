@@ -106,6 +106,10 @@ Type TritonGPUToLLVMTypeConverter::convertTritonTensorType(
   }
 
   unsigned numElementsPerThread = getTotalElemsPerThread(type);
+
+  if (eltType.isIntOrFloat() && numElementsPerThread > 1)
+    return vec_ty(eltType, numElementsPerThread);
+
   SmallVector<Type, 4> types(numElementsPerThread, eltType);
   return LLVM::LLVMStructType::getLiteral(ctx, types);
 }
