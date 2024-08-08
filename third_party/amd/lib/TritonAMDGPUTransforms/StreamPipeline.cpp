@@ -2,6 +2,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Analysis/AxisInfo.h"
@@ -266,7 +267,9 @@ LogicalResult LoopPipeliner::checkOpUses() {
       if (auto convertLayout = llvm::dyn_cast<ttg::ConvertLayoutOp>(use))
         if (auto tensorType =
                 dyn_cast<RankedTensorType>(convertLayout.getResult().getType()))
-          if (cvtNeedsSharedMemory(convertLayout.getSrc().getType(),
+          if (triton::gpu::TritonGPUDialect::getMoeBypassLDS(
+                  op->getParentOfType<ModuleOp>()) &&
+              cvtNeedsSharedMemory(convertLayout.getSrc().getType(),
                                    tensorType))
             if (auto dotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(
                     tensorType.getEncoding())) {

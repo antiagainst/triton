@@ -43,6 +43,7 @@ class HIPOptions:
     kpack: int = 1
     allow_flush_denorm: bool = False
     max_num_imprecise_acc_default: int = 0
+    moe_bypass_lds = False
     backend_name: str = 'hip'
 
     def __post_init__(self):
@@ -75,6 +76,7 @@ class HIPBackend(BaseBackend):
         self.binary_ext = "hsaco"
 
     def parse_options(self, opts) -> Any:
+        print(opts)
         args = {'arch': self.target.arch}
         if not "enable_fp_fusion" in args:
             args["enable_fp_fusion"] = os.getenv("TRITON_DEFAULT_FP_FUSION", "1") == "1"
@@ -138,7 +140,7 @@ class HIPBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.ttir.add_convert_to_ttgpuir(pm, f"hip:{options.arch}", options.num_warps, options.warp_size,
-                                           options.num_ctas)
+                                           options.num_ctas, options.moe_bypass_lds)
         pm.run(mod)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()

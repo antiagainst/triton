@@ -58,7 +58,8 @@ public:
             dstDotOp.getParent() == srcMfmaEncoding)
           return;
       }
-      if (!cvtNeedsSharedMemory(srcType, dstType))
+      if (triton::gpu::TritonGPUDialect::getMoeBypassLDS(mod) &&
+          !cvtNeedsSharedMemory(srcType, dstType))
         return;
       auto srcOrder = triton::gpu::getOrder(srcEncoding);
       auto rank = srcOrder.size();

@@ -4,6 +4,7 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Index/IR/IndexDialect.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -749,11 +750,12 @@ public:
   ConvertTritonToTritonGPU() = default;
   // constructor with some parameters set explicitly.
   ConvertTritonToTritonGPU(const std::string &target, int numWarps,
-                           int threadsPerWarp, int numCTAs) {
+                           int threadsPerWarp, int numCTAs, bool moeBypassLDS) {
     this->numWarps = numWarps;
     this->threadsPerWarp = threadsPerWarp;
     this->numCTAs = numCTAs;
     this->target = target;
+    this->moeBypassLDS = moeBypassLDS;
   }
 
   void runOnOperation() override {
@@ -786,6 +788,8 @@ public:
 
     mod->setAttr(AttrNumCTAsName,
                  IntegerAttr::get(i32_ty, llvm::APInt(32, numCTAs.getValue())));
+    if (this->moeBypassLDS)
+      mod->setAttr("amd.moe-bypass-lds", mlir::Builder(context).getUnitAttr());
 
     if (this->target.getValue().empty()) {
       mod.emitError("expected target specification to attach to the module op");
@@ -810,9 +814,10 @@ std::unique_ptr<OperationPass<ModuleOp>>
 mlir::triton::createConvertTritonToTritonGPUPass(const std::string &target,
                                                  int numWarps,
                                                  int threadsPerWarp,
-                                                 int numCTAs) {
-  return std::make_unique<::ConvertTritonToTritonGPU>(target, numWarps,
-                                                      threadsPerWarp, numCTAs);
+                                                 int numCTAs,
+                                                 bool moeBypassLDS) {
+  return std::make_unique<::ConvertTritonToTritonGPU>(
+      target, numWarps, threadsPerWarp, numCTAs, moeBypassLDS);
 }
 
 std::unique_ptr<OperationPass<ModuleOp>>

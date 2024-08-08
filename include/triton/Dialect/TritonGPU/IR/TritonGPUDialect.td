@@ -33,6 +33,9 @@ def TritonGPU_Dialect : Dialect {
         return 1;
       return cast<IntegerAttr>(mod->getAttr("triton_gpu.num-ctas")).getInt();
     }
+    static bool getMoeBypassLDS(ModuleOp mod) {
+      return mod->getAttrOfType<UnitAttr>("amd.moe-bypass-lds") != nullptr;
+    }
     void registerTypes();
 
     static std::string getThreadsPerWarpAttrName() { return "triton_gpu.threads-per-warp"; }

@@ -612,6 +612,7 @@ class JITFunction(KernelInterface[T]):
             target = driver.active.get_current_target()
             backend = self.make_backend(target)
             options = backend.parse_options(kwargs)
+            print(options)
 
             # deprecated arguments
             assert "device_type" not in kwargs, "device_type option is deprecated; current target will be used"
