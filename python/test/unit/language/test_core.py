@@ -3307,9 +3307,7 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
                           for type_a in ["e2m1", "e4m3", "e5m2"]
                           for type_b in ["e4m3", "e5m2"]])
 def test_scaled_dot(M, N, K, col_a, col_b, type_a, type_b, num_warps, device):
-    if not is_cuda():
-        pytest.skip("scaled_dot only supported on CUDA")
-    else:
+    if is_cuda():
         cc = torch.cuda.get_device_capability()
         if cc < (8, 9):
             pytest.skip("float8e4nv not supported on CUDA < 8.9")
