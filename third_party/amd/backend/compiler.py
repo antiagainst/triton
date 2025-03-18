@@ -79,7 +79,7 @@ class HIPOptions:
         # Only kpack=1 is supported on gfx950
         kpack = 1 if self.arch == 'gfx950' else self.kpack
         object.__setattr__(self, 'kpack', kpack)
-        libs = ["ocml", "ockl"]
+        libs = ["ocml", "ockl", "opencl"]
         for lib in libs:
             extern_libs[lib] = str(default_libdir / f'{lib}.bc')
         object.__setattr__(self, 'extern_libs', tuple(extern_libs.items()))
@@ -363,7 +363,8 @@ class HIPBackend(BaseBackend):
             paths = [
                 str(default_libdir / 'asanrtl.bc'),
                 str(default_libdir / "ocml.bc"),
-                str(default_libdir / "ockl.bc")
+                str(default_libdir / "ockl.bc"),
+                str(default_libdir / "opencl.bc")
             ]
             llvm.link_extern_libs(llvm_mod, paths)
         elif options.extern_libs:

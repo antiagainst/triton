@@ -133,7 +133,7 @@ private:
 
     auto loc = callOp.getLoc();
 
-    Operation *replacementOp = nullptr;
+    Value replacementOp = nullptr;
     if (calleeName == "__triton_hip_iabs") {
       assert(operands.size() == 1);
       replacementOp = rewriter.create<LLVM::AbsOp>(loc, returnType, operands[0],
@@ -168,8 +168,34 @@ private:
           LLVM::createConstantF32(loc, rewriter, log2e), defaultFlags);
       const char *intrinsic = ftz ? "llvm.amdgcn.exp2.f32" : "llvm.exp2.f32";
 
-      replacementOp = LLVM::createLLVMIntrinsicCallOp(
-          rewriter, loc, intrinsic, returnType, mulOp->getResult(0));
+      replacementOp =
+          LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsic, returnType,
+                                          mulOp->getResult(0))
+              .getResult(0);
+    } else if (calleeName == "__triton_hip_load_acquire_system") {
+      assert(operands.size() == 1);
+      // llvm::outs() << "catching __triton_hip_load_acqiure_system" << "\n";
+      /*
+      const char *intrinsic = "_Z20atomic_load_explicitPU3AS0VU7_"
+                              "Atomicj12memory_order12memory_scope";
+      auto fnType = LLVM::LLVMFunctionType::get(
+          f32_ty, {ptr_ty(callOp.getContext(),1), i32_ty, i32_ty});
+      LLVM::LLVMFuncOp funcOp =
+          triton::gpu::appendOrGetExternFuncOp(rewriter, callOp, intrinsic,
+      fnType); TritonLLVMOpBuilder b(loc, rewriter); Value acquireSem =
+      b.i32_val(2); Value systemScope = b.i32_val(5); auto callOp =
+      LLVM::createLLVMCallOp( rewriter, loc, funcOp, {operands[0], acquireSem,
+      systemScope}); replacementOp = callOp.getResult();
+      */
+
+      auto loadOp = rewriter.create<LLVM::LoadOp>(
+          loc, f32_ty, operands[0], /*alignment=*/16,
+          /*isVolatile =*/false, /*isNonTemporal*/ false,
+          /*isInvariant =*/false, /*isInvariantGroup=*/false,
+          LLVM::AtomicOrdering::acquire, "agent");
+      replacementOp = loadOp.getResult();
+
+      // llvm::outs() << "repl op: " << replacementOp << "\n";
     }
 
     if (replacementOp) {
