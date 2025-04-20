@@ -184,16 +184,19 @@ def _matmul_ogs(
     WPtrs = W + (offs_w_k.to(index_type)[:, None] * stride_w_k + offs_w_n.to(index_type)[None, :] * stride_w_n)
     # compute output
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k in range(K, BLOCK_K * pid_k, -(BLOCK_K * SPLIT_K)):
+    num_iterations = tl.cdiv(K - BLOCK_K * pid_k, BLOCK_K * SPLIT_K)
+    tl.assume(num_iterations > 0)
+    for k in range(0, num_iterations):
         if EVEN_K:
             mask_k = tl.full([BLOCK_K], True, dtype=tl.int1)
             mask_k_w = tl.full([PACKED_BLOCK_K_W], True, dtype=tl.int1)
             mask_k_scale = tl.full([MX_SCALE_BLOCK_K], True, dtype=tl.int1)
         else:
-            mask_k = offs_k < k
-            mask_k_w = offs_w_k < tl.cdiv(k, W_PACK_DIVISOR)
+            k_indices = K - BLOCK_K * pid_k * k
+            mask_k = offs_k < k_indices
+            mask_k_w = offs_w_k < tl.cdiv(k_indices, W_PACK_DIVISOR)
             if is_microscaled_format and not SWIZZLE_MX:
-                mask_k_scale = offs_k_scale < tl.cdiv(k, MX_PACK_DIVISOR)
+                mask_k_scale = offs_k_scale < tl.cdiv(k_indices, MX_PACK_DIVISOR)
 
         x = tl.load(XPtrs, mask=mask_k[None, :], other=0.0)
         w = tl.load(WPtrs, mask=mask_k_w[:, None], other=0.0, cache_modifier=W_CACHE_MODIFIER)
