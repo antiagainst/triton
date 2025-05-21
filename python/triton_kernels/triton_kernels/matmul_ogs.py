@@ -677,16 +677,24 @@ def matmul_ogs_torch(x, w, bias,
         routing_data = RoutingData(None, None, w.shape[0], 1)
     n_expts_act = routing_data.n_expts_act
     # memory offsets
+    print(f"{is_input_batched=}")
+    print(f"{routing_data.n_expts_tot=}")
     if routing_data.n_expts_tot > 1 and not is_input_batched:
         sizes = routing_data.expt_hist
+        print(f"{sizes=}")
         off = torch.zeros(sizes.shape[0] + 1, dtype=torch.int32)
         off[1:] = torch.cumsum(sizes, 0)
+        print(f"{off=}")
         offs = list(itertools.pairwise(off))
+        print(f"{offs=}")
     else:
         offs = [[0, x.shape[1]] for _ in range(w.shape[0])]
     # compute
     n_rows = x.shape[1] if gather_indx is None else gather_indx.dst_indx.shape[0]
     y = torch.zeros((x.shape[0], n_rows, w.shape[-1]), device=x.device, dtype=x.dtype)
+    print(f"{x.shape=}")
+    print(f"{w.shape=}")
+    print(f"{y.shape=}")
     for i, (lo, hi) in enumerate(offs):
         if gather_indx is None:
             idx = torch.arange(lo, hi, device=x.device)
@@ -699,6 +707,11 @@ def matmul_ogs_torch(x, w, bias,
             out += bias[i, :] if betas is None else bias[i, :] * betas[lo:hi, None]
         if gammas is not None:
             out *= gammas[lo:hi, None]
+        out_round = round_y(out)
+        print(f"batch={batch}, lo={lo}, hi={hi}, out.shape={out.shape}, {out_round.shape=}")
+        print("Type of batch:", type(batch))
+        print("y[batch, lo:hi, :].shape:", y[batch, lo:hi, :].shape)
+        assert hi - lo == out.shape[0], "mismatched shape"
         y[batch, lo:hi, :] = round_y(out)
     if not is_input_batched:
         y = y.view(y.shape[1], y.shape[2])

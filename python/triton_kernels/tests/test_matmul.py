@@ -15,7 +15,7 @@ from triton_kernels.numerics_details.mxfp import SwizzlingType, downcast_to_mxfp
 # testing utilities
 from triton_kernels.testing import assert_close, compute_actual_scale
 # target-specific utilities
-from triton_kernels.target_info import is_hip
+from triton_kernels.target_info import is_hip, get_cdna_version
 
 # ---------------
 # initialize data
@@ -195,7 +195,7 @@ class Case:
             Case(300, 400, 800, "ragged", "float8_e5m2", "mxfloat4_e2m1", 8, 4, hbm_swizzling=True),
             Case(300, 400, 400, "batched", "float8_e5m2", "mxfloat8_e4m3fn", 32, 4),
             Case(300, 400, 400, "batched", "float8_e5m2", "mxfloat8_e4m3fn", 32, 4, hbm_swizzling=True),
-            # AMD
+            # AMD CNDA3
             Case(300, 400, 400, "ragged", "float8_e4m3fnuz", "float8_e4m3fnuz"),
             Case(1000, 400, 400, "ragged", "float8_e4m3fnuz", "float8_e4m3fnuz", 3, 1),
             Case(600, 400, 400, "ragged", "float8_e4m3fnuz", "float8_e4m3fnuz", 4, 2),
@@ -218,30 +218,40 @@ class Case:
 def test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, has_y_gammas, is_persistent, n_expts_tot,
             n_expts_act, n_expt_shards, mode, act_dtype_str, weight_dtype_str, block_m, hbm_swizzling, epilogue_subtile,
             device):
-    # TODO: remove when Triton FP8 supports proper RTNE
-    if "float8" in weight_dtype_str and torch.cuda.get_device_capability()[0] < 9:
-        pytest.skip("Float8 not tested on A100")
-    if "float8_e4m3fnuz" in weight_dtype_str and not is_hip():
-        pytest.skip("float8_e4m3fnuz only tested on HIP platforms")
-    if "mx" in weight_dtype_str and is_hip():
-        pytest.skip("mxfloat* only tested on CUDA platforms")
-    if "float16" in act_dtype_str and "mx" in weight_dtype_str and torch.cuda.get_device_capability()[0] >= 10:
-        pytest.skip("float16 x mx not supported with cuda capability >= 10")
-    if "float8" in act_dtype_str and "mx" in weight_dtype_str and torch.cuda.get_device_capability()[0] < 10:
-        pytest.skip("float8 x mx not supported with cuda capability < 10")
-    if fused_scatter and split_k > 1:
-        pytest.skip("fused scatter scratchpad not supported with split_k")
-    if hbm_swizzling:
-        if is_hip():
-            pytest.skip("NYI. HBM swizzling just implemented for CUDA.")
-        if torch.cuda.get_device_capability()[0] < 9:
-            pytest.skip("NYI. Ampere swizzling.")
-        if torch.cuda.get_device_capability()[0] < 10:
-            if "mxfloat4" not in weight_dtype_str:
-                pytest.skip("NYI. Hopper swizzling just implemented for mxfp4.")
-            if k % 64 != 0 or n % 64 != 0:
-                # Automatic padding not implemented for Hopper swizzle
-                pytest.skip("Hopper swizzling acts on a 64x64 tile (4x1 mma tiles).")
+    if is_hip():
+        constraints_to_trim = ["epilogue_subtile"]
+        if hbm_swizzling:
+            pytest.skip("HBM swizzling not yet implemented on HIP")
+        if epilogue_subtile:
+            pytest.skip("Epilogue subtile swizzling not yet implemented on HIP")
+        cdna_version = get_cdna_version()
+        if cdna_version == 4:
+            if "float8_e4m3fnuz" in weight_dtype_str:
+                pytest.skip("float8_e4m3fnuz is only tested on HIP CDNA3")
+        elif cdna_version != 3:
+            pytest.skip("not yet implemented on current HIP CDNA architecture")
+    else:  # CUDA
+        constraints_to_trim = []
+        # TODO: remove when Triton FP8 supports proper RTNE
+        if "float8" in weight_dtype_str and torch.cuda.get_device_capability()[0] < 9:
+            pytest.skip("Float8 not tested on A100")
+        if "float8_e4m3fnuz" in weight_dtype_str:
+            pytest.skip("float8_e4m3fnuz is only tested on HIP CDNA3")
+        if "float16" in act_dtype_str and "mx" in weight_dtype_str and torch.cuda.get_device_capability()[0] >= 10:
+            pytest.skip("float16 x mx not supported with cuda capability >= 10")
+        if "float8" in act_dtype_str and "mx" in weight_dtype_str and torch.cuda.get_device_capability()[0] < 10:
+            pytest.skip("float8 x mx not supported with cuda capability < 10")
+        if fused_scatter and split_k > 1:
+            pytest.skip("fused scatter scratchpad not supported with split_k")
+        if hbm_swizzling:
+            if torch.cuda.get_device_capability()[0] < 9:
+                pytest.skip("NYI. Ampere swizzling.")
+            if torch.cuda.get_device_capability()[0] < 10:
+                if "mxfloat4" not in weight_dtype_str:
+                    pytest.skip("NYI. Hopper swizzling just implemented for mxfp4.")
+                if k % 64 != 0 or n % 64 != 0:
+                    # Automatic padding not implemented for Hopper swizzle
+                    pytest.skip("Hopper swizzling acts on a 64x64 tile (4x1 mma tiles).")
 
     torch.manual_seed(0)
 
@@ -260,6 +270,10 @@ def test_op(m, n, k, split_k, do_gather, do_scatter, fused_scatter, has_y_gammas
         "is_persistent": is_persistent,
         "epilogue_subtile": epilogue_subtile,
     }
+    for trimk in constraints_to_trim:
+        constraints.pop(trimk, None)
+
+
     opt_flags.update_opt_flags_constraints(constraints)
 
     is_mixed_input = act_dtype_str != weight_dtype_str
