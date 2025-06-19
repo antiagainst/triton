@@ -509,10 +509,18 @@ bool emitTransferBetweenRegistersAndShared(
   StringAttr kWarp = str_attr("warp");
 
   auto shape = sharedTy.getShape();
-  PaddedLinearLayout paddedLayout =
-      triton::gpu::toPaddedLinearLayout(shape, sharedTy.getEncoding());
-  LinearLayout regToSharedLayout =
-      regLayout.invertAndCompose(paddedLayout.getLinear());
+  auto paddedLayout =
+      dyn_cast<triton::gpu::PaddedSharedEncodingAttr>(sharedTy.getEncoding());
+  auto sharedLL = LinearLayout::empty();
+  if (paddedLayout) {
+    auto nonSwizzleAttr = triton::gpu::SwizzledSharedEncodingAttr::get(
+        sharedTy.getContext(), /*vec=*/1, /*perPhase=*/1, /*maxPhase=*/1,
+        paddedLayout.getOrder(), paddedLayout.getCTALayout());
+    sharedLL = toLinearLayout(shape, nonSwizzleAttr);
+  } else {
+    sharedLL = triton::gpu::toLinearLayout(shape, sharedTy.getEncoding());
+  }
+  LinearLayout regToSharedLayout = regLayout.invertAndCompose(sharedLL);
 
   // TODO(jlebar): We don't currently support loading from shared memory in a
   // different CTA.  We'd need to emit `mapa.shared::cluster` instructions.
@@ -537,10 +545,12 @@ bool emitTransferBetweenRegistersAndShared(
   //
   // It's OK if the vector width we choose here is wider than the hardware
   // supports; LLVM will legalize it.
-  const int vecElems = std::min(
-      {regToSharedLayout.getNumConsecutiveInOut(),
-       paddedLayout.getMinInterval().value_or(std::numeric_limits<int>::max()),
-       maxVecElems.value_or(std::numeric_limits<int>::max())});
+  int vecElems =
+      std::min({regToSharedLayout.getNumConsecutiveInOut(),
+                maxVecElems.value_or(std::numeric_limits<int>::max())});
+  if (paddedLayout) {
+    vecElems = std::min(vecElems, int(paddedLayout.getMinInterval()));
+  }
 
   auto withCTAOffset = triton::gpu::getNumCTAs(sharedTy.getEncoding()) > 1;
   Value blockId =
@@ -555,7 +565,7 @@ bool emitTransferBetweenRegistersAndShared(
   // Thus we use `pseudoinvert` instead of `invert` here for simplicity.
   auto allocShape = sharedTy.getAllocShape();
   auto invertAllocSharedLayout = LinearLayout::empty();
-  if (!paddedLayout.hasPadding()) {
+  if (!paddedLayout) {
     // For now this is only needed for the cases where we have swizzling.
     invertAllocSharedLayout =
         triton::gpu::toLinearLayout(allocShape.take_back(sharedTy.getRank()),
