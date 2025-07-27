@@ -36,16 +36,15 @@ def convert_layout_kernel(XBLOCK: ttgl.constexpr, layout_a: ttgl.constexpr, layo
     res = ttgl.convert_layout(x, layout_b)  # noqa: F841
 
 
-@pytest.mark.skipif(not is_cuda(), reason="Requires CUDA")
 def test_convert_layout(fresh_knobs):
     knobs.compilation.disable_line_info = True
 
     layout_a = ttgl.BlockedLayout(size_per_thread=[1], threads_per_warp=[32], warps_per_cta=[4], order=[0])
     layout_b = ttgl.SliceLayout(
         1, ttgl.BlockedLayout(size_per_thread=[1, 1], threads_per_warp=[1, 32], warps_per_cta=[1, 4], order=[1, 0]))
-    h = convert_layout_kernel.warmup(128, layout_a, layout_b, num_warps=layout_a.warps_per_cta[0], grid=(1, ))
+    module = from_ast_to_module(convert_layout_kernel, GPUTarget("hip", "gfx1200", 32), {"XBLOCK": 128, "layout_a": layout_a, "layout_b": layout_b}, 4, 1)
     expecttest.assert_expected_inline(
-        anonymize_ir(h.asm["source"]), """\
+        anonymize_ir(module.str()), """\
 #blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
 #blocked1 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "...", "ttg.threads-per-warp" = 32 : i32} {
@@ -58,7 +57,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 #loc = loc(unknown)
 """)
     expecttest.assert_expected_inline(
-        anonymize_ir(h.asm["ttgir"]), """\
+        anonymize_ir(module.str()), """\
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "...", "ttg.threads-per-warp" = 32 : i32} {
   tt.func public @convert_layout_kernel() attributes {noinline = false} {
     tt.return loc(#loc)
@@ -1221,22 +1220,20 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 """)
 
 
-def from_ast_to_module(fn, device, num_warps, num_ctas):
-    assert device == 'cuda' or device == 'hip', "device should be hip or cuda"
-
+def from_ast_to_module(fn, target: GPUTarget, constexprs, num_warps, num_ctas):
     context = ir.context()
     ir.load_dialects(context)
     options = dict(sanitize_overflow=False)
-    stub_target = GPUTarget("hip", 'gfx1200', 32) if device == 'hip' else GPUTarget('cuda', 100, 32)
-    stub_backend = make_backend(stub_target)
+    stub_backend = make_backend(target)
     stub_backend.load_dialects(context)
     options = stub_backend.parse_options(options)
     codegen_fns = stub_backend.get_codegen_implementation(options)
     signature = {}
-    src = GluonASTSource(fn=fn, signature=signature)
+    src = GluonASTSource(fn=fn, signature=signature, constexprs=constexprs)
     builder = ir.builder(context)
     module = builder.create_module()
-    module.set_attr("ttg.threads-per-warp", builder.get_int32_attr(stub_target.warp_size))
+    module.set_attr("ttg.target", builder.get_string_attr(f"{target.backend}:{target.arch}"))
+    module.set_attr("ttg.threads-per-warp", builder.get_int32_attr(target.warp_size))
     module.set_attr("ttg.num-warps", builder.get_int32_attr(num_warps))
     module.set_attr("ttg.num-ctas", builder.get_int32_attr(num_ctas))
     module = ast_to_ttir(fn, src, context=context, options=options, codegen_fns=codegen_fns, module_map=dict(),
