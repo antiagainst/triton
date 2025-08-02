@@ -535,7 +535,7 @@ def ScaledUpcastFp4Op : TT_AMDGPU_Op<"scaled_upcast_fp4", [Pure]> {
 
   let description = [{
     Upcast fp4 (e2m1) values packed as i8 values and multiply with the given
-    E8M0 scale encoded as BF16. This maps to `v_cvt_scalef32_*` intrinsics
+    E8M0 scale encoded as BF16/FP32. This maps to `v_cvt_scalef32_*` intrinsics
     on the AMD CDNA4 architecture.
 
     The lower 4 bits of the i8s represent the first fp4 element, and the upper
@@ -552,9 +552,9 @@ def ScaledUpcastFp4Op : TT_AMDGPU_Op<"scaled_upcast_fp4", [Pure]> {
     ];
 
   let arguments = (ins
-    RankedTensorOf<[I8]>:$input,
-    RankedTensorOf<[BF16]>:$scale,
-    I32Attr:$axis);
+      RankedTensorOf<[I8]>:$input,
+      RankedTensorOf<[AnyTypeOf<[BF16, F32]>]>:$scale,
+      I32Attr:$axis);
   let results = (outs RankedTensorOf<[AnyTypeOf<[F16, BF16, F32]>]>:$output);
 
   let assemblyFormat = [{
@@ -575,12 +575,12 @@ def ScaledUpcastFp8Op : TT_AMDGPU_Op<"scaled_upcast_fp8", [
 
   let description = [{
     Upcast fp8 (e4m3/e5m2) values and multiply with the given E8M0 scale
-    encoded as BF16. This maps to `v_cvt_scalef32_*` intrinsics
+    encoded as BF16/FP32. This maps to `v_cvt_scalef32_*` intrinsics
     on the AMD CDNA4 architecture.
   }];
   let arguments = (ins
-    RankedTensorOf<[AnyTypeOf<[F8E4M3FN, F8E5M2]>]>:$input,
-    RankedTensorOf<[BF16]>:$scale);
+      RankedTensorOf<[AnyTypeOf<[F8E4M3FN, F8E5M2]>]>:$input,
+      RankedTensorOf<[AnyTypeOf<[BF16, F32]>]>:$scale);
   let results = (outs RankedTensorOf<[AnyTypeOf<[F16, BF16, F32]>]>:$output);
 
   let assemblyFormat = [{
