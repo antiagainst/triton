@@ -1193,17 +1193,16 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
     auto b = TritonLLVMOpBuilder(loc, rewriter);
 
     auto tensorDescTy = op.getDesc().getType();
-    auto descBlockTy = tensorDescTy.getBlockType();
-    auto encoding = descBlockTy.getEncoding();
+    auto encoding = tensorDescTy.getSharedLayout();
     Type elementType =
-        getTypeConverter()->convertType(descBlockTy.getElementType());
+        getTypeConverter()->convertType(tensorDescTy.getElementType());
     // Use descBlockTy to query shared layout because TDM lowering logic expects
     // the descriptor's dimensionality. For rank-reducing loads, destination
     // shared memory may have fewer dimensions than the descriptor block type.
     triton::LinearLayout sharedLayout =
         isPaddedEncoding(encoding)
-            ? paddedLinearLayout(descBlockTy.getShape(), encoding)
-            : toLinearLayout(descBlockTy);
+            ? paddedLinearLayout(tensorDescTy.getShape(), encoding)
+            : toLinearLayout(tensorDescTy.getShape(), encoding);
     // Extract padding information if present
     unsigned padInterval = 0;
     unsigned padAmount = 0;
@@ -1250,10 +1249,10 @@ struct AsyncTDMCopyGlobalToLocalOpConversion
 
     auto ctaId = targetInfo.getClusterCTAId(rewriter, loc);
 
-    auto shapePerCTA = triton::gpu::getShapePerCTA(descBlockTy);
+    auto shapePerCTA =
+        triton::gpu::getShapePerCTA(encoding, tensorDescTy.getShape());
     auto sharedOrder = triton::gpu::getOrder(
-        cast<triton::gpu::SharedEncodingTrait>(descBlockTy.getEncoding()),
-        shapePerCTA);
+        cast<triton::gpu::SharedEncodingTrait>(encoding), shapePerCTA);
     bool isRowMajor = sharedOrder[0] == (sharedOrder.size() - 1);
 
     mlir::LLVM::AMD::emitTDMLoadStore(
