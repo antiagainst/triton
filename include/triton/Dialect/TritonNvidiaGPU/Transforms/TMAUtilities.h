@@ -39,6 +39,13 @@ inline SmallVector<int64_t> getTMABlockShape(triton::gpu::MemDescType ty,
   return getTMABlockShape(ty.getEncoding(), shapePerCTA, packedSize, mode);
 }
 
+inline SmallVector<int64_t> getTMABlockShape(triton::TensorDescInterface ty,
+                                             bool packedSize,
+                                             gpu::TMAMode mode) {
+  auto shapePerCTA = gpu::getShapePerCTA(ty.getSharedLayout(), ty.getShape());
+  return getTMABlockShape(ty.getSharedLayout(), shapePerCTA, packedSize, mode);
+}
+
 FailureOr<int> getTMASwizzleMode(Location loc, triton::TensorDescInterface ty);
 FailureOr<int> getTMAElementType(Location loc, triton::TensorDescInterface ty);
 
