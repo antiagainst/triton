@@ -110,9 +110,8 @@ struct MakeTensorDescOpConversion
     auto tensorDescTy = result.getType();
     auto sharedEnc = tensorDescTy.getSharedLayout();
     if (!sharedEnc) {
-      if (!sharedEnc)
-        return rewriter.notifyMatchFailure(
-            op, "Descriptor has no shared memory layout assigned.");
+      return rewriter.notifyMatchFailure(
+          op, "Descriptor has no shared memory layout assigned.");
     }
     unsigned padInterval = 0;
     unsigned padAmount = 0;
