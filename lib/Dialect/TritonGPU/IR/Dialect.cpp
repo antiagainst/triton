@@ -409,16 +409,27 @@ SmallVector<unsigned> orderPerDimImpl(const LinearLayout &ll,
   return order.takeVector();
 }
 
-bool isExpensiveCat(CatOp cat, Attribute targetEncoding) {
-  // If the new elements per thread is less than the old one, we will need to
-  // do convert encoding that goes through shared memory anyway. So we
-  // consider it as expensive.
-  RankedTensorType tensorTy = cat.getType();
-  auto totalElemsPerThread = gpu::getTotalElemsPerThread(tensorTy);
-  auto shape = tensorTy.getShape();
-  auto newTotalElemsPerThread =
-      gpu::getTotalElemsPerThread(targetEncoding, shape);
-  return newTotalElemsPerThread < totalElemsPerThread;
+static int64_t getNumNonBroadcastRegisters(ArrayRef<int64_t> shape,
+                                           Attribute encoding) {
+  auto kReg = StringAttr::get(encoding.getContext(), "register");
+  auto strippedLayout =
+      toLinearLayout(shape, encoding).removeZeroBasesAlongDim(kReg);
+  return strippedLayout.getInDimSize(kReg);
+}
+
+static int64_t getNumNonBroadcastRegisters(RankedTensorType tensorType) {
+  return getNumNonBroadcastRegisters(tensorType.getShape(),
+                                     tensorType.getEncoding());
+}
+
+bool isLegalCatEncoding(CatOp cat, Attribute targetEncoding) {
+  // Cat lowering concatenates the operands' unique register values. So the
+  // number of unique register values in the result must be equal to those in
+  // the operands.
+  int64_t operandRegs = getNumNonBroadcastRegisters(cat.getLhs().getType()) * 2;
+  int64_t resultRegs =
+      getNumNonBroadcastRegisters(cat.getType().getShape(), targetEncoding);
+  return resultRegs == operandRegs;
 }
 
 static LogicalResult
@@ -3013,6 +3024,20 @@ struct TritonGPUInferLayoutInterface
 
       if (bLL != resLL.resizeOutDim(dim0, 1))
         return op->emitError("Incompatible CGA layout for operand 1");
+    }
+    return success();
+  }
+
+  LogicalResult verifyCatOpEncodingCompatibility(Operation *op) const override {
+    auto cat = cast<CatOp>(op);
+    int64_t operandRegs =
+        getNumNonBroadcastRegisters(cat.getLhs().getType()) * 2;
+    int64_t resultRegs = getNumNonBroadcastRegisters(cat.getType());
+    if (resultRegs != operandRegs) {
+      return op->emitError("tt.cat result encoding requires ")
+             << resultRegs
+             << " non-broadcast register values, but operands provide "
+             << operandRegs;
     }
     return success();
   }
