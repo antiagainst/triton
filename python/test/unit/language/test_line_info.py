@@ -252,7 +252,14 @@ def test_line_info_ir_source(monkeypatch, status, tmp_path, fresh_triton_cache):
         assert check_file_lines(file_lines, "/path/test.py", 8, should_contain=False)
         assert check_file_lines(file_lines, str(temp_file), -1, should_contain=True)
     else:
-        assert check_file_lines(file_lines, "/path/test.py", 8, should_contain=True)
+        if obj_kind == "cubin":
+            # Recent ptxas versions can coalesce this minimal load-store
+            # sequence under the store line in SASS, even though the PTX still
+            # carries the load line.
+            assert (check_file_lines(file_lines, "/path/test.py", 8, should_contain=True)
+                    or check_file_lines(file_lines, "/path/test.py", 9, should_contain=True))
+        else:
+            assert check_file_lines(file_lines, "/path/test.py", 8, should_contain=True)
 
 
 def test_use_name_loc_as_prefix(fresh_triton_cache):
