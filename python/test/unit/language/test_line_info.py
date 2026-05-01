@@ -195,15 +195,14 @@ def test_line_info(func: str):
         assert (check_file_lines(file_lines, "test_line_info.py", source_line_number(device_noinline, "x = tl.load")))
         assert (check_file_lines(file_lines, "test_line_info.py", source_line_number(device_noinline, "tl.store")))
     elif func == "autotune":
-        assert (check_file_lines(file_lines, "test_line_info.py",
-                                 source_line_number(kernel_autotune, "for i in range"))
+        assert (check_file_lines(file_lines, "test_line_info.py", source_line_number(kernel_autotune, "for i in range"))
                 or check_file_lines(file_lines, "test_line_info.py", source_def_line_number(kernel_autotune)))
         assert (check_file_lines(file_lines, "test_line_info.py", source_line_number(kernel_autotune, "x = tl.load")))
         assert (check_file_lines(file_lines, "test_line_info.py", source_line_number(kernel_autotune, "tl.store")))
     elif func == "dot_combine":
         assert (check_file_lines(file_lines, "test_line_info.py", source_line_number(kernel_dot_combine, "d = tl.dot")))
-        assert (check_file_lines(file_lines, "test_line_info.py",
-                                 source_line_number(kernel_dot_combine, "d = d + c"), should_contain=False))
+        assert (check_file_lines(file_lines, "test_line_info.py", source_line_number(kernel_dot_combine, "d = d + c"),
+                                 should_contain=False))
     elif func == "cdiv":
         assert (check_file_lines(file_lines, "test_line_info.py", source_line_number(kernel_cdiv, "tl.device_print")))
 
@@ -340,8 +339,8 @@ def test_use_name_loc_as_prefix(fresh_triton_cache):
         triton.compiler.ASTSource(fn=kernel_basic, signature={"src": "*fp32", "N": "i32", "BLOCK_SIZE": "constexpr"},
                                   constexprs={"BLOCK_SIZE": 16}))
 
-    check_template = substitute_source_line_numbers(
-        inspect.getsource(kernel_basic.fn), kernel_basic, DEF_LINE="def kernel_basic")
+    check_template = substitute_source_line_numbers(inspect.getsource(kernel_basic.fn), kernel_basic,
+                                                    DEF_LINE="def kernel_basic")
     run_filecheck("placeholder", h.asm["ttir"], check_template)
 
     if is_hopper_or_newer():
