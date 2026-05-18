@@ -3489,7 +3489,8 @@ def device_assert(cond, msg="", mask=None, _semantic=None):
 
 @builtin
 def inline_asm_elementwise(asm: str, constraints: str, args: Sequence, dtype: Union[dtype, Sequence[dtype]],
-                           is_pure: bool, pack: int, _semantic=None):
+                           is_pure: bool, pack: int, operand_vec_sizes: Sequence[int] | None = None,
+                           result_vec_sizes: Sequence[int] | None = None, _semantic=None):
     '''
         Execute inline assembly over a tensor.  Essentially, this is :code:`map`
         where the function is inline assembly.
@@ -3581,12 +3582,22 @@ def inline_asm_elementwise(asm: str, constraints: str, args: Sequence, dtype: Un
         :param dtype: the element type(s) of the returned tensor(s)
         :param is_pure: if true, the compiler assumes the asm block has no side-effects
         :param pack: the number of elements to be processed by one instance of inline assembly
+        :param operand_vec_sizes: optional LLVM inline asm operand register vectorization degree.
+            If set, this must have one value per value in ``args``, and each value N must evenly
+            divide the number of LLVM asm registers generated for that argument in one instance
+            of inline assembly.
+        :param result_vec_sizes: optional LLVM inline asm result vector register sizes.
+            If set, this must have one value per output tensor, and each value N must evenly
+            divide the number of LLVM asm registers generated for that output tensor in one instance
+            of inline assembly.
         :return: one tensor or a tuple of tensors of the given dtypes
     '''
     asm = _unwrap_if_constexpr(asm)
     constraints = _unwrap_if_constexpr(constraints)
     pack = _unwrap_if_constexpr(pack)
     is_pure = _unwrap_if_constexpr(is_pure)
+    operand_vec_sizes = _unwrap_if_constexpr(operand_vec_sizes) or []
+    result_vec_sizes = _unwrap_if_constexpr(result_vec_sizes) or []
 
     # Wrap `dtype` in a tuple if it's not already.
     try:
@@ -3607,7 +3618,8 @@ def inline_asm_elementwise(asm: str, constraints: str, args: Sequence, dtype: Un
         dispatch_args = [next(tensors) if isinstance(arg, tensor) else arg for arg in dispatch_args]
     handles = [t.handle for t in dispatch_args]
     builder = _semantic.builder
-    call = builder.create_inline_asm(asm, constraints, handles, [ty.to_ir(builder) for ty in res_tys], is_pure, pack)
+    call = builder.create_inline_asm(asm, constraints, handles, [ty.to_ir(builder) for ty in res_tys], is_pure, pack,
+                                     operand_vec_sizes, result_vec_sizes)
 
     if not has_multiple_outputs:
         return tensor(call.get_result(0), res_tys[0])
