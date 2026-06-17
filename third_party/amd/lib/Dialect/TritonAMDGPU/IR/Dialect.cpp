@@ -330,10 +330,16 @@ LogicalResult ScaledUpcastFp4Op::verify() {
     return emitError()
            << "scale and output must both have an encoding, or neither";
 
-  if (scaleEnc && !mlir::triton::gpu::areLayoutsEquivalent(
-                      outputTy.getShape(),
-                      cast<mlir::triton::gpu::LayoutEncodingTrait>(scaleEnc),
-                      cast<mlir::triton::gpu::LayoutEncodingTrait>(outputEnc)))
+  // Encodings may still be unresolved placeholders (e.g. gluon auto encoding)
+  // that have no linear-layout representation yet. Defer the layout
+  // compatibility check until they are lowered to concrete layouts.
+  auto scaleLayout =
+      dyn_cast_if_present<mlir::triton::gpu::LayoutEncodingTrait>(scaleEnc);
+  auto outputLayout =
+      dyn_cast_if_present<mlir::triton::gpu::LayoutEncodingTrait>(outputEnc);
+  if (scaleLayout && outputLayout &&
+      !mlir::triton::gpu::areLayoutsEquivalent(outputTy.getShape(), scaleLayout,
+                                               outputLayout))
     return emitError() << "scale and output encodings are not compatible:\n"
                        << mlir::triton::gpu::toLinearLayout(outputTy).toString()
                        << "\n"

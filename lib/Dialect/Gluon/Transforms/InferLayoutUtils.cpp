@@ -154,6 +154,24 @@ LogicalResult inferLayout(
         if (failed(updateEncoding(tiedArgs, info, &func, valueToEncoding,
                                   worklist, hashMemo)))
           return failure();
+      } else if (auto upcast = dyn_cast<triton::gpu::UpcastFpOpInterface>(op)) {
+        // Mirror of the backward case: query the op interface with the operand
+        // index this value feeds, since a given operand may map to a different
+        // result encoding (and inferDstEncoding bails out on upcast ops). Only
+        // touch results that are still auto encodings; an upcast may have a
+        // concrete result whose encoding must not be overwritten.
+        auto dstEnc =
+            upcast.inferDstEncoding(use.getOperandNumber(), info.encoding);
+        if (dstEnc) {
+          LayoutInfo dstInfo{dstEnc, info.mayVary};
+          llvm::SmallVector<Value> autoResults;
+          for (auto result : op->getResults())
+            if (typeCheck(result.getType()))
+              autoResults.push_back(result);
+          if (failed(updateEncoding(autoResults, dstInfo, &func,
+                                    valueToEncoding, worklist, hashMemo)))
+            return failure();
+        }
       } else {
         auto dstEnc = inferDstEncoding(op, info.encoding);
         if (dstEnc) {
@@ -175,6 +193,26 @@ LogicalResult inferLayout(
         if (failed(updateEncoding(tiedArgs, info, &func, valueToEncoding,
                                   worklist, hashMemo)))
           return failure();
+      } else if (auto upcast =
+                     dyn_cast<triton::gpu::UpcastFpOpInterface>(definingOp)) {
+        // Upcast ops (e.g. AMD scaled_upcast_fp4/fp8) may require a distinct
+        // encoding per operand (the packed fp4 input vs. the scale), so resolve
+        // each operand through the op interface individually. The index-agnostic
+        // inferSrcEncoding helper bails out on these ops for exactly this reason.
+        // Only auto-encoded operands are resolved; operands that already carry a
+        // concrete encoding must be left untouched.
+        for (auto &operand : definingOp->getOpOperands()) {
+          if (!typeCheck(operand.get().getType()))
+            continue;
+          auto srcEncoding =
+              upcast.inferSrcEncoding(operand.getOperandNumber(), info.encoding);
+          if (!srcEncoding)
+            continue;
+          if (failed(updateEncoding({operand.get()},
+                                    LayoutInfo{srcEncoding, info.mayVary}, &func,
+                                    valueToEncoding, worklist, hashMemo)))
+            return failure();
+        }
       } else {
         auto srcEncoding = inferSrcEncoding(definingOp, info.encoding);
         if (srcEncoding) {

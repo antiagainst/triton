@@ -460,6 +460,12 @@ LogicalResult Fp4ToFpOp::verifyFp4ToFp(mlir::Operation *op,
   if (!resTy.getEncoding()) {
     return success();
   }
+  // Encodings may still be unresolved placeholders (e.g. gluon auto encoding)
+  // that have no linear-layout representation yet. Defer the layout
+  // compatibility check until they are lowered to concrete layouts.
+  if (!isa<LayoutEncodingTrait>(srcTy.getEncoding()) ||
+      !isa<LayoutEncodingTrait>(resTy.getEncoding()))
+    return success();
   auto srcLl = toLinearLayout(srcTy);
   auto resLl = toLinearLayout(resTy);
   auto *ctx = srcTy.getContext();
