@@ -956,3 +956,17 @@ tt.func @pure_elementwise_asm_tensor_descriptor(%offset: i32, %mem: !desc) {
   %value = tt.elementwise_inline_asm "add.u32 $0, $1, $2;" {constraints = "=r,r,r", pure = true, packed_element = 1 : i32} %offset, %mem : i32, !desc -> i32
   tt.return
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0]}>
+!desc = !ttg.memdesc<128xi32, #shared, #ttg.shared_memory, mutable>
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func @elementwise_asm_vectorized_descriptor(%mem: !desc, %x: tensor<128xi32, #blocked>) {
+    // A descriptor contributes one address, regardless of packed_element.
+    // expected-error @+1 {{operand_vec_sizes element #0 must evenly divide the packed asm values for operand #0}}
+    %value = tt.elementwise_inline_asm "" {constraints = "=r,r,r", pure = false, packed_element = 4 : i32, operand_vec_sizes = array<i32: 2, 4>, result_vec_sizes = array<i32: 4>} %mem, %x : !desc, tensor<128xi32, #blocked> -> tensor<128xi32, #blocked>
+    tt.return
+  }
+}

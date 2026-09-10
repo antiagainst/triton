@@ -164,3 +164,18 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.thr
     tt.return %0 : tensor<512xi8, #linear>
   }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#shared = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // GFX1250-LABEL: inline_asm_vec_sizes_descriptor
+  tt.func @inline_asm_vec_sizes_descriptor(%arg0: tensor<128xi32, #blocked>) -> tensor<128xi32, #blocked> {
+    %mem = ttg.local_alloc : () -> !ttg.memdesc<128xi32, #shared, #ttg.shared_memory, mutable>
+    // The descriptor is one address; only the tensor operand is vectorized.
+    // GFX1250: llvm.inline_asm has_side_effects asm_dialect = att "test $0, $1, $2", "=v,v,v" %{{.*}}, %{{.*}} : (i32, i128) -> i128
+    %0 = tt.elementwise_inline_asm "test $0, $1, $2" {constraints = "=v,v,v", operand_vec_sizes = array<i32: 1, 4>, packed_element = 4 : i32, pure = false, result_vec_sizes = array<i32: 4>} %mem, %arg0 : !ttg.memdesc<128xi32, #shared, #ttg.shared_memory, mutable>, tensor<128xi32, #blocked> -> tensor<128xi32, #blocked>
+    tt.return %0 : tensor<128xi32, #blocked>
+  }
+}
