@@ -138,14 +138,17 @@ execute_process(
 include("${TRITON_THIRD_PARTY_CMAKE_VARS_FILE}")
 
 if(TRITON_BUILD_PYTHON_MODULE)
+  # build_helpers.py rebuilds the AMD code generation library whenever these
+  # sources no longer match the published one, so reconfigure when they change.
+  file(GLOB_RECURSE TRITON_AMD_CODEGEN_SOURCES CONFIGURE_DEPENDS
+       "${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd/backend/codegen/*")
   set_property(
     DIRECTORY
     APPEND
     PROPERTY CMAKE_CONFIGURE_DEPENDS
       "${CMAKE_CURRENT_SOURCE_DIR}/python/build_helpers.py"
       "${CMAKE_CURRENT_SOURCE_DIR}/cmake/amd-llvm-info.json"
-      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd/backend/codegen/CMakeLists.txt"
-      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd/backend/codegen/amdgpu_codegen.cc"
+      ${TRITON_AMD_CODEGEN_SOURCES}
       "${CMAKE_CURRENT_SOURCE_DIR}/include/triton/Tools/LLVMOptions.h"
       "${CMAKE_CURRENT_SOURCE_DIR}/lib/Tools/LLVMOptions.cpp"
       "${CMAKE_CURRENT_SOURCE_DIR}/cmake/nvidia-toolchain-version.json"

@@ -7,6 +7,7 @@ on:
     paths:
       - cmake/llvm-build-info.json
       - cmake/amd-llvm-build-info.json
+      - cmake/amd-llvm-info.json
       - third_party/amd/backend/codegen/**
       - include/triton/Tools/LLVMOptions.h
       - lib/Tools/LLVMOptions.cpp
@@ -43,7 +44,7 @@ jobs:
         import subprocess
 
         if os.environ["EVENT_NAME"] == "workflow_dispatch":
-            packages = ["llvm", "amd-codegen"]
+            packages = ["llvm", "amd-llvm", "amd-codegen"]
         else:
             changed = subprocess.check_output([
                 "git", "diff", "--name-only", os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
@@ -51,8 +52,13 @@ jobs:
             packages = []
             if "cmake/llvm-build-info.json" in changed:
                 packages.append("llvm")
+            if "cmake/amd-llvm-build-info.json" in changed:
+                packages.append("amd-llvm")
+            # The code generation library links the SDK pinned in amd-llvm-info.json
+            # and never rebuilds LLVM. Its packages are named by a hash of their
+            # inputs, so a revision that is already published is skipped.
             if any(
-                path in {"cmake/amd-llvm-build-info.json", "include/triton/Tools/LLVMOptions.h",
+                path in {"cmake/amd-llvm-info.json", "include/triton/Tools/LLVMOptions.h",
                          "lib/Tools/LLVMOptions.cpp"}
                 or path.startswith("third_party/amd/backend/codegen/") for path in changed
             ):
@@ -95,11 +101,20 @@ jobs:
       run: |
         rpm --import https://packages.microsoft.com/keys/microsoft.asc
         dnf install --assumeyes https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm
-        dnf install --assumeyes azure-cli llvm-toolset-20.1.8 python38-pip python38-devel git jq tar gzip
+        dnf install --assumeyes azure-cli llvm-toolset-20.1.8 python38-pip python38-devel python3.11 git jq tar gzip
         alternatives --set python3 /usr/bin/python3.8
         echo "extra_cmake_flags=-DCMAKE_ASM_COMPILER=clang -DCMAKE_CXX_FLAGS=-Wno-everything -DPython3_EXECUTABLE=/usr/bin/python3.8 -DPython_EXECUTABLE=/usr/bin/python3.8" >> "$GITHUB_ENV"
+        # build_helpers.py requires a newer Python than the one LLVM is built with.
+        echo "build_python=/usr/bin/python3.11" >> "$GITHUB_ENV"
+
+    - name: Set up Python
+      if: matrix.config.target-os != 'almalinux'
+      uses: actions/setup-python@v7
+      with:
+        python-version: 3.11
 
     - name: Fetch LLVM Build Metadata
+      if: matrix.package != 'amd-codegen'
       shell: bash
       run: |
         if [[ "${{ matrix.package }}" == "llvm" ]]; then
@@ -110,6 +125,7 @@ jobs:
           echo 'llvm_include_tests=ON' >> "$GITHUB_ENV"
           echo 'llvm_build_targets=check-mlir install-distribution' >> "$GITHUB_ENV"
         else
+          # The SDK that the AMD code generation library links statically.
           MANIFEST=llvm-build/cmake/amd-llvm-build-info.json
           echo 'llvm_projects=' >> "$GITHUB_ENV"
           echo 'llvm_targets=AMDGPU' >> "$GITHUB_ENV"
@@ -128,7 +144,6 @@ jobs:
 
         LLVM_BUILD_NUMBER="$(jq -r '.build_number' "$MANIFEST")"
         echo "Found LLVM build number: ${LLVM_BUILD_NUMBER}"
-        echo "llvm_build_number=${LLVM_BUILD_NUMBER}" >> "$GITHUB_ENV"
 
         SHORT_LLVM_COMMIT_HASH="${LLVM_COMMIT_HASH:0:8}"
         echo "Short LLVM commit hash: ${SHORT_LLVM_COMMIT_HASH}"
@@ -137,43 +152,48 @@ jobs:
         INSTALL_DIR="${{ matrix.package }}-${SHORT_LLVM_COMMIT_HASH}-${{ matrix.config.target-os }}-${{ matrix.config.arch }}-${LLVM_BUILD_NUMBER}"
         echo "LLVM installation directory name: ${INSTALL_DIR}"
         echo "llvm_install_dir=${INSTALL_DIR}" >> ${GITHUB_ENV}
-        if [[ "${{ matrix.package }}" == "llvm" ]]; then
-          echo "llvm_sdk_dir=${INSTALL_DIR}" >> "$GITHUB_ENV"
-        else
-          echo "llvm_sdk_dir=${{ github.workspace }}/llvm-project/install" >> "$GITHUB_ENV"
-        fi
+
+    - name: Fetch AMD CodeGen Metadata
+      if: matrix.package == 'amd-codegen'
+      shell: bash
+      run: |
+        INFO="$("${build_python:-python3}" llvm-build/python/build_helpers.py amd_codegen_info \
+          --triton-cache-path "${RUNNER_TEMP}/triton" \
+          --triton-llvm-system-suffix "${{ matrix.config.target-os }}-${{ matrix.config.arch }}")"
+        echo "AMD code generation: ${INFO}"
+        echo "llvm_install_dir=$(jq -r '.name' <<< "${INFO}")" >> "$GITHUB_ENV"
+        echo "amd_codegen_library_revision=$(jq -r '.library_revision' <<< "${INFO}")" >> "$GITHUB_ENV"
 
     - name: Check LLVM Build Does Not Exist
       shell: bash
       run: |
         URL="https://oaitriton.blob.core.windows.net/public/llvm-builds/${{ env.llvm_install_dir }}.tar.gz"
         HTTP_STATUS="$(curl --head --silent --show-error --output /dev/null --write-out "%{http_code}" "${URL}")"
-        if [ "${HTTP_STATUS}" != "404" ]; then
+        if [[ "${{ matrix.package }}" == "amd-codegen" && "${HTTP_STATUS}" == "200" ]]; then
+          echo "AMD code generation for these inputs is already published: ${URL}"
+          echo "skip_build=true" >> "$GITHUB_ENV"
+        elif [ "${HTTP_STATUS}" != "404" ]; then
           echo "LLVM build already exists or could not be checked: ${URL} returned ${HTTP_STATUS}"
           exit 1
         fi
 
     - name: Checkout LLVM
+      if: matrix.package != 'amd-codegen'
       uses: actions/checkout@v6
       with:
         repository: ${{ env.llvm_repository }}
         path: llvm-project
         ref: ${{ env.llvm_commit_hash }}
 
-    - name: Set up Python
-      if: matrix.config.target-os != 'almalinux'
-      uses: actions/setup-python@v7
-      with:
-        python-version: 3.11
-
     - name: Set up MSVC
-      if: matrix.config.target-os == 'windows'
+      if: matrix.config.target-os == 'windows' && env.skip_build != 'true'
       uses: ilammy/msvc-dev-cmd@v1.13.0
       with:
         arch: ${{ matrix.config.msvc_arch }}
         toolset: ${{ matrix.config.msvc_toolset }}
 
     - name: Install Prerequisites
+      if: env.skip_build != 'true'
       shell: bash
       run: |
         python3 -m pip install cmake ninja sccache
@@ -181,6 +201,7 @@ jobs:
         rm -rf ${{ env.SCCACHE_DIR }}/*
 
     - name: Enable Cache
+      if: matrix.package != 'amd-codegen'
       uses: actions/cache@v6
       with:
         path: ${{ env.SCCACHE_DIR }}
@@ -188,7 +209,7 @@ jobs:
         restore-keys: ${{ matrix.package }}-${{ matrix.config.target-os }}-${{ matrix.config.arch }}-
 
     - name: Free disk space on Ubuntu
-      if: matrix.config.arch == 'x64' && matrix.config.target-os == 'ubuntu'
+      if: matrix.package != 'amd-codegen' && matrix.config.arch == 'x64' && matrix.config.target-os == 'ubuntu'
       run: |
         df -h
         echo "Removing large packages"
@@ -199,13 +220,13 @@ jobs:
         df -h
 
     - name: Configure, Build, Test, and Install LLVM (Ubuntu, CentOS, and macOS)
-      if: matrix.config.target-os == 'ubuntu' || matrix.config.target-os == 'almalinux' || matrix.config.target-os == 'macos'
+      if: matrix.package != 'amd-codegen' && (matrix.config.target-os == 'ubuntu' || matrix.config.target-os == 'almalinux' || matrix.config.target-os == 'macos')
       run: >
         cmake -GNinja -Bllvm-project/build
         -DCMAKE_BUILD_TYPE=Release
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
         -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-        -DCMAKE_INSTALL_PREFIX="${{ env.llvm_sdk_dir }}"
+        -DCMAKE_INSTALL_PREFIX="${{ env.llvm_install_dir }}"
         -DCMAKE_LINKER=lld
         -DLLVM_BUILD_UTILS=${{ env.llvm_build_utils }}
         -DLLVM_BUILD_TOOLS=ON
@@ -228,12 +249,12 @@ jobs:
         ninja -C llvm-project/build ${{ env.llvm_build_targets }}
 
     - name: Configure, Build, Test, and Install LLVM (Windows)
-      if: matrix.config.target-os == 'windows'
+      if: matrix.package != 'amd-codegen' && matrix.config.target-os == 'windows'
       run: >
         cmake -GNinja -Bllvm-project/build
         -DCMAKE_BUILD_TYPE=Release
         -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
-        -DCMAKE_INSTALL_PREFIX="${{ env.llvm_sdk_dir }}"
+        -DCMAKE_INSTALL_PREFIX="${{ env.llvm_install_dir }}"
         -DLLVM_BUILD_UTILS=${{ env.llvm_build_utils }}
         -DLLVM_BUILD_TOOLS=ON
         -DLLVM_ENABLE_ASSERTIONS=ON
@@ -254,23 +275,22 @@ jobs:
 
         ninja -C llvm-project/build ${{ env.llvm_build_targets }}
 
-
-    - name: Build Standalone AMD Codegen
-      if: matrix.package == 'amd-codegen'
+    # Use the same build_helpers.py path as a source build of Triton, against
+    # the SDK pinned in amd-llvm-info.json, with the compilers that built it.
+    - name: Build AMD CodeGen
+      if: matrix.package == 'amd-codegen' && env.skip_build != 'true'
+      shell: bash
+      env:
+        CC: ${{ matrix.config.target-os == 'windows' && 'cl' || 'clang' }}
+        CXX: ${{ matrix.config.target-os == 'windows' && 'cl' || 'clang++' }}
       run: >
-        cmake -GNinja -B amd-codegen-build
-        -DCMAKE_BUILD_TYPE=Release
-        -DCMAKE_C_COMPILER=${{ matrix.config.target-os == 'windows' && 'cl' || 'clang' }}
-        -DCMAKE_CXX_COMPILER=${{ matrix.config.target-os == 'windows' && 'cl' || 'clang++' }}
-        -DLLVM_DIR="${{ env.llvm_sdk_dir }}/lib/cmake/llvm"
-        -DCMAKE_INSTALL_PREFIX="${{ env.llvm_install_dir }}"
-        -DTRITON_AMD_LLVM_REVISION="${{ env.llvm_commit_hash }}-${{ env.llvm_build_number }}"
-        llvm-build/third_party/amd/backend/codegen
+        "${build_python:-python3}" llvm-build/python/build_helpers.py build_amd_codegen
+        --triton-cache-path "${RUNNER_TEMP}/triton"
+        --triton-llvm-system-suffix "${{ matrix.config.target-os }}-${{ matrix.config.arch }}"
+        --install-prefix "${{ env.llvm_install_dir }}"
 
-        ninja -C amd-codegen-build install
-
-    - name: Verify Standalone Library
-      if: matrix.package == 'amd-codegen'
+    - name: Verify AMD CodeGen Library
+      if: matrix.package == 'amd-codegen' && env.skip_build != 'true'
       shell: bash
       run: |
         python3 - <<'PY'
@@ -286,16 +306,17 @@ jobs:
         path = pathlib.Path(os.environ["llvm_install_dir"]) / "lib" / filename
         library = ctypes.CDLL(str(path.resolve()))
         library.triton_amdgpu_revision.restype = ctypes.c_char_p
-        expected = os.environ["llvm_commit_hash"] + "-" + os.environ["llvm_build_number"]
-        assert library.triton_amdgpu_revision().decode() == expected
+        assert library.triton_amdgpu_revision().decode() == os.environ["amd_codegen_library_revision"]
         print("Loaded standalone backend without importing Triton:", path)
         PY
 
     - name: Package Build Artifacts
+      if: env.skip_build != 'true'
       shell: bash
       run: tar czf "${{ env.llvm_install_dir }}.tar.gz" "${{ env.llvm_install_dir }}"
 
     - name: Upload Build Artifacts
+      if: env.skip_build != 'true'
       uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.package }}-${{ matrix.config.target-os }}-${{ matrix.config.arch }}
@@ -303,7 +324,7 @@ jobs:
           ${{ github.workspace }}/${{ env.llvm_install_dir }}.tar.gz
 
     - name: Azure login
-      if: ${{ (github.repository == 'triton-lang/triton') && github.ref_name == 'main' }}
+      if: ${{ github.repository == 'triton-lang/triton' && github.ref_name == 'main' && env.skip_build != 'true' }}
       uses: azure/login@v2
       with:
         client-id: ${{ secrets.AZURE_CLIENT_ID_LLVM }}
@@ -311,7 +332,7 @@ jobs:
         subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID_LLVM }}
 
     - name: Upload LLVM Artifacts to Azure
-      if: ${{ (github.repository == 'triton-lang/triton') && github.ref_name == 'main' }}
+      if: ${{ github.repository == 'triton-lang/triton' && github.ref_name == 'main' && env.skip_build != 'true' }}
       shell: bash -el {0}
       run: |
         sha256sum "${{ env.llvm_install_dir }}.tar.gz"
@@ -322,11 +343,12 @@ jobs:
         echo "Blob URL: ${URL}"
 
     - name: Azure Logout
-      if: ${{ (github.repository == 'triton-lang/triton') && github.ref_name == 'main' }}
+      if: ${{ github.repository == 'triton-lang/triton' && github.ref_name == 'main' && env.skip_build != 'true' }}
       run: |
         az logout
         az cache purge
         az account clear
 
     - name: Dump Sccache Statistics
+      if: matrix.package != 'amd-codegen'
       run: sccache --show-stats
