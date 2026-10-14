@@ -109,7 +109,7 @@ static int computeKLaneBitsMask(DotOperandEncodingAttr dotEnc) {
 // direction need to be masked out (to zero) so they don't incorrectly
 // contribute stale K to the WMMA result.
 static Value maskRepeatedKLanes(ConversionPatternRewriter &rewriter,
-                                Location loc, LinearLayout dotLayout,
+                                Location loc, const LinearLayout &dotLayout,
                                 DotOperandEncodingAttr dotEnc, Value operand,
                                 unsigned warpSize) {
   auto ctx = dotLayout.getOutDimNames().begin()->getContext();
@@ -127,13 +127,18 @@ static Value maskRepeatedKLanes(ConversionPatternRewriter &rewriter,
   return tb.select(isCanonical, operand, zero);
 }
 
+// Gathers the kBase registers of `value` that feed operand `opIdx` of the WMMA
+// instruction at (batch, nonK, kIdx) and converts them to the intrinsic's
+// operand type. For A/B operands, K positions beyond `kDimTensor` are padded
+// with zeros and broadcast lanes moving in K are masked out. For scale
+// operands, `opSel` is set to select the lanes holding the scales.
 Value getOperandVals(ConversionPatternRewriter &rewriter,
                      const LLVMTypeConverter *typeConverter,
-                     LinearLayout dotLayout, Value value, int opIdx, int rank,
+                     const LinearLayout &dotLayout, Value value, int opIdx,
                      int batch, int nonK, int kIdx, int kInstrSize, int kBase,
                      int64_t kDimTensor, DotOperandEncodingAttr dotEnc,
                      unsigned warpSize, int *opSel, RankedTensorType tensorType,
-                     Type type, Location loc, bool isScale = false) {
+                     Location loc, bool isScale = false) {
   auto ctx = dotLayout.getOutDimNames().begin()->getContext();
 
   const StringAttr dim0 = StringAttr::get(ctx, "dim0");
@@ -144,6 +149,7 @@ Value getOperandVals(ConversionPatternRewriter &rewriter,
 
   auto elems = unpackTensorElements(loc, value, rewriter, tensorType);
 
+  Type type = tensorType.getElementType();
   Type elemTy = typeConverter->convertType(type);
   Type vecTy = vec_ty(elemTy, kBase);
 
@@ -158,9 +164,9 @@ Value getOperandVals(ConversionPatternRewriter &rewriter,
 
   // Compute registers via pseudoinverse
   SmallVector<std::pair<StringAttr, int32_t>> outCoords;
-  outCoords.reserve(rank);
+  outCoords.reserve(tensorType.getRank());
 
-  if (rank == 3) {
+  if (tensorType.getRank() == 3) {
     outCoords.push_back({dim0, batch});
     outCoords.push_back({dim1, mCoord});
     outCoords.push_back({dim2, nCoord});
@@ -209,7 +215,12 @@ Value getOperandVals(ConversionPatternRewriter &rewriter,
     rawElems = tb.insert_element(vecTy, rawElems, elem, tb.i32_val(k));
   }
 
-  return rawElems;
+  Value operand = prepareOperands(rewriter, rawElems, type,
+                                  wmmaLayout.getVersion(), kBase, loc, isScale);
+  if (isScale)
+    return operand;
+  return maskRepeatedKLanes(rewriter, loc, dotLayout, dotEnc, operand,
+                            warpSize);
 }
 
 static inline int32_t getWmmaF8F6F4MatrixFormat(Type t) {
@@ -294,9 +305,8 @@ Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
                                   Location loc, Value valA, Value valScaleA,
                                   Value valB, Value valScaleB, Value valC,
                                   Type aElType, Type aScaleElType, Type bElType,
-                                  Type bScaleElType, Type dElType,
-                                  int opSelScaleA, int opSelScaleB,
-                                  StringRef name) {
+                                  Type bScaleElType, int opSelScaleA,
+                                  int opSelScaleB, StringRef name) {
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   SmallVector<Value> operands;
 
@@ -335,17 +345,6 @@ Value generateScaledWMMAIntrinsic(ConversionPatternRewriter &rewriter,
   return wmmaIntrinsic.getResult(0);
 }
 
-Value generateWMMAOp(ConversionPatternRewriter &rewriter, Location loc,
-                     int version, Value valA, Value valB, Value valC,
-                     Type aElType, Type bElType, Type dElType,
-                     StringRef intrinsicName, std::optional<bool> tiedLower) {
-  // Independent of wmma version because builtin functions are backward
-  // compatible
-  return generateWMMAIntrinsic(rewriter, loc, version, valA, valB, valC,
-                               aElType, bElType, dElType, intrinsicName,
-                               tiedLower);
-}
-
 static uint64_t packMN(uint32_t m, uint32_t n) {
   return (uint64_t(m) << 32) | uint64_t(n);
 }
@@ -379,11 +378,12 @@ std::optional<int> findNextM(LinearLayout repLayout, int &reg, int elemsPerVec,
   return nextM;
 }
 
-// Conduct the Dot conversion.
-LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
-                         const TargetInfo &targetInfo,
-                         ConversionPatternRewriter &rewriter,
-                         const LLVMTypeConverter *typeConverter) {
+} // namespace
+
+LogicalResult convertWMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
+                          const TargetInfo &targetInfo,
+                          const LLVMTypeConverter *typeConverter,
+                          ConversionPatternRewriter &rewriter) {
   auto wmmaLayout = cast<AMDWmmaEncodingAttr>(
       cast<RankedTensorType>(op.getResult().getType()).getEncoding());
   int wmmaVer = wmmaLayout.getVersion();
@@ -510,36 +510,20 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
       }
     }
     for (size_t k = 0; k < numRepK; ++k) {
-      auto ha =
-          getOperandVals(rewriter, typeConverter, aLayout, loadedA,
-                         /*opIdx*/ 0, rank, batchIdx, m, k, kInstrSize, kBase,
-                         kDimTensorA, aEnc, warpSize, /*opScale*/ nullptr,
-                         aTensorTy, aTensorTy.getElementType(), loc);
-      ha = prepareOperands(rewriter, ha, aTensorTy.getElementType(), wmmaVer,
-                           kBase, loc);
-      ha = maskRepeatedKLanes(rewriter, loc, aLayout, aEnc, ha, warpSize);
-
-      auto hb =
-          getOperandVals(rewriter, typeConverter, bLayout, loadedB,
-                         /*opIdx*/ 1, rank, batchIdx, n, k, kInstrSize, kBase,
-                         kDimTensorB, bEnc, warpSize, /*opScale*/ nullptr,
-                         bTensorTy, bTensorTy.getElementType(), loc);
-      hb = prepareOperands(rewriter, hb, bTensorTy.getElementType(), wmmaVer,
-                           kBase, loc);
-      hb = maskRepeatedKLanes(rewriter, loc, bLayout, bEnc, hb, warpSize);
-
+      Value ha =
+          getOperandVals(rewriter, typeConverter, aLayout, loadedA, /*opIdx=*/0,
+                         batchIdx, m, k, kInstrSize, kBase, kDimTensorA, aEnc,
+                         warpSize, /*opSel=*/nullptr, aTensorTy, loc);
+      Value hb =
+          getOperandVals(rewriter, typeConverter, bLayout, loadedB, /*opIdx=*/1,
+                         batchIdx, n, k, kInstrSize, kBase, kDimTensorB, bEnc,
+                         warpSize, /*opSel=*/nullptr, bTensorTy, loc);
       Value haNext;
       if (tiedGroup == 2) {
-        haNext =
-            getOperandVals(rewriter, typeConverter, aLayout, loadedA,
-                           /*opIdx*/ 0, rank, batchIdx, nextM.value(), k,
-                           kInstrSize, kBase, kDimTensorA, aEnc, warpSize,
-                           nullptr, aTensorTy, aTensorTy.getElementType(), loc);
-
-        haNext = prepareOperands(rewriter, haNext, aTensorTy.getElementType(),
-                                 wmmaVer, kBase, loc);
-        haNext =
-            maskRepeatedKLanes(rewriter, loc, aLayout, aEnc, haNext, warpSize);
+        haNext = getOperandVals(rewriter, typeConverter, aLayout, loadedA,
+                                /*opIdx=*/0, batchIdx, nextM.value(), k,
+                                kInstrSize, kBase, kDimTensorA, aEnc, warpSize,
+                                /*opSel=*/nullptr, aTensorTy, loc);
       }
 
       for (int subTied = 0; subTied < tiedGroup; ++subTied) {
@@ -547,14 +531,12 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
             tiedGroup == 2 ? std::optional<bool>(subTied != 0) : std::nullopt;
         auto aValue = subTied == 0 ? ha : haNext;
         acc = wmmaLayout.getIsTransposed()
-                  ? generateWMMAOp(rewriter, loc, wmmaVer, hb, aValue, acc,
-                                   bTensorTy.getElementType(),
-                                   aTensorTy.getElementType(), dstElemTy,
-                                   intrinsicName, optTied)
-                  : generateWMMAOp(rewriter, loc, wmmaVer, aValue, hb, acc,
-                                   aTensorTy.getElementType(),
-                                   bTensorTy.getElementType(), dstElemTy,
-                                   intrinsicName, optTied);
+                  ? generateWMMAIntrinsic(rewriter, loc, wmmaVer, hb, aValue,
+                                          acc, bElemTy, aElemTy, dstElemTy,
+                                          intrinsicName, optTied)
+                  : generateWMMAIntrinsic(rewriter, loc, wmmaVer, aValue, hb,
+                                          acc, aElemTy, bElemTy, dstElemTy,
+                                          intrinsicName, optTied);
       }
     }
     for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
@@ -582,11 +564,17 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
 //    asymmetric transposed WMMA
 //  - Intrinsic call created with (hb, sb, ha, sa) matches the expected LLVM
 //  types
-LogicalResult convertScaledDot(triton::DotScaledOp op,
-                               triton::DotScaledOp::Adaptor adaptor,
-                               const TargetInfo &targetInfo,
-                               ConversionPatternRewriter &rewriter,
-                               const LLVMTypeConverter *typeConverter) {
+LogicalResult convertScaledWMMA(triton::DotScaledOp op,
+                                triton::DotScaledOp::Adaptor adaptor,
+                                const TargetInfo &targetInfo,
+                                const LLVMTypeConverter *typeConverter,
+                                ConversionPatternRewriter &rewriter) {
+  assert(isa<mlir::triton::gpu::LinearEncodingTrait>(
+             op.getAScale().getType().getEncoding()) &&
+         isa<mlir::triton::gpu::LinearEncodingTrait>(
+             op.getBScale().getType().getEncoding()) &&
+         "Both LhsScale and RhsScale should be a LinearEncodingTrait.");
+
   auto ctx = op.getContext();
   auto wmmaLayout = cast<AMDWmmaEncodingAttr>(
       cast<RankedTensorType>(op.getResult().getType()).getEncoding());
@@ -657,6 +645,7 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
            << targetFeatures.getArch();
   }
 
+  StringRef intrinsicName = maybeWmmaScaleIntrinsic->name;
   auto kBaseA = maybeWmmaScaleIntrinsic->kBaseA;
   auto kBaseB = maybeWmmaScaleIntrinsic->kBaseB;
 
@@ -696,7 +685,6 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
   // compute number of output elements that each thread holds for one WMMA
   // instruction.
   auto elemsPerVec = mnkDim[0] * mnkDim[1] / warpSize;
-  auto dElemsToStorePerThread = mnkDim[0] * mnkDim[1] / warpSize;
   auto vecTy = vec_ty(dstElemTy, elemsPerVec);
   assert(wmmaLayout.getTileLayout(rank).getInDimSize(kRegister) ==
              elemsPerVec &&
@@ -713,62 +701,43 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
     int n = repIndices[rank == 3 ? 2 : 1].second;
 
     Value acc = tb.undef(vecTy);
-    for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
+    for (unsigned v = 0; v < elemsPerVec; ++v) {
       acc = tb.insert_element(vecTy, acc, fc[reg + v], tb.i32_val(v));
     }
     for (size_t k = 0; k < numRepK; k++) {
       int scaleOpSelA = 0;
       int scaleOpSelB = 0;
 
-      auto ha = getOperandVals(rewriter, typeConverter, aLayout, loadedA,
-                               /*opIdx*/ 0, rank, batchIdx, m, k, kDimA, kBaseA,
-                               kDimTensorA, aEnc, warpSize, /*opSel*/ nullptr,
-                               aTensorTy, aTensorTy.getElementType(), loc);
-      ha = prepareOperands(rewriter, ha, aTensorTy.getElementType(), wmmaVer,
-                           kBaseA, loc);
+      Value ha =
+          getOperandVals(rewriter, typeConverter, aLayout, loadedA, /*opIdx=*/0,
+                         batchIdx, m, k, kDimA, kBaseA, kDimTensorA, aEnc,
+                         warpSize, /*opSel=*/nullptr, aTensorTy, loc);
+      Value hb =
+          getOperandVals(rewriter, typeConverter, bLayout, loadedB, /*opIdx=*/1,
+                         batchIdx, n, k, kDimB, kBaseB, kDimTensorB, bEnc,
+                         warpSize, /*opSel=*/nullptr, bTensorTy, loc);
+      Value sa = getOperandVals(
+          rewriter, typeConverter, aScaleLayout, loadedAScale, /*opIdx=*/0,
+          batchIdx, m, k, kDimScale, KBaseScale, /*kDimTensor=*/kDimScale, aEnc,
+          warpSize, &scaleOpSelA, aScaleTensorTy, loc, /*isScale=*/true);
+      Value sb = getOperandVals(
+          rewriter, typeConverter, bScaleLayout, loadedBScale, /*opIdx=*/0,
+          batchIdx, n, k, kDimScale, KBaseScale, /*kDimTensor=*/kDimScale, bEnc,
+          warpSize, &scaleOpSelB, bScaleTensorTy, loc, /*isScale=*/true);
 
-      auto hb = getOperandVals(rewriter, typeConverter, bLayout, loadedB,
-                               /*opIdx*/ 1, rank, batchIdx, n, k, kDimB, kBaseB,
-                               kDimTensorB, bEnc, warpSize, /*opSel*/ nullptr,
-                               bTensorTy, bTensorTy.getElementType(), loc);
-      hb = prepareOperands(rewriter, hb, bTensorTy.getElementType(), wmmaVer,
-                           kBaseB, loc);
-
-      ha = maskRepeatedKLanes(rewriter, loc, aLayout, aEnc, ha, warpSize);
-      hb = maskRepeatedKLanes(rewriter, loc, bLayout, bEnc, hb, warpSize);
-
-      auto sa = getOperandVals(
-          rewriter, typeConverter, aScaleLayout, loadedAScale,
-          /*opIdx*/ 0, rank, batchIdx, m, k, kDimScale, KBaseScale,
-          /*kDimTensor*/ kDimScale, aEnc, warpSize, &scaleOpSelA,
-          aScaleTensorTy, aScaleTensorTy.getElementType(), loc,
-          /*isScale*/ true);
-      sa = prepareOperands(rewriter, sa, aScaleTensorTy.getElementType(),
-                           wmmaVer, KBaseScale, loc, /*isScale=*/true);
-
-      auto sb = getOperandVals(
-          rewriter, typeConverter, bScaleLayout, loadedBScale,
-          /*opIdx*/ 0, rank, batchIdx, n, k, kDimScale, KBaseScale,
-          /*kDimTensor*/ kDimScale, bEnc, warpSize, &scaleOpSelB,
-          bScaleTensorTy, bScaleTensorTy.getElementType(), loc,
-          /*isScale*/ true);
-      sb = prepareOperands(rewriter, sb, bScaleTensorTy.getElementType(),
-                           wmmaVer, KBaseScale, loc, /*isScale=*/true);
-
-      StringRef intrinsicName = maybeWmmaScaleIntrinsic->name;
       acc = wmmaLayout.getIsTransposed()
                 ? generateScaledWMMAIntrinsic(
                       rewriter, loc, hb, sb, ha, sa, acc, scaledBElemType,
                       bScaleTensorTy.getElementType(), scaledAElemType,
-                      aScaleTensorTy.getElementType(), dstElemTy, scaleOpSelB,
-                      scaleOpSelA, intrinsicName)
+                      aScaleTensorTy.getElementType(), scaleOpSelB, scaleOpSelA,
+                      intrinsicName)
                 : generateScaledWMMAIntrinsic(
                       rewriter, loc, ha, sa, hb, sb, acc, scaledAElemType,
                       aScaleTensorTy.getElementType(), scaledBElemType,
-                      bScaleTensorTy.getElementType(), dstElemTy, scaleOpSelA,
-                      scaleOpSelB, intrinsicName);
+                      bScaleTensorTy.getElementType(), scaleOpSelA, scaleOpSelB,
+                      intrinsicName);
     }
-    for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
+    for (unsigned v = 0; v < elemsPerVec; ++v) {
       fc[reg + v] = tb.extract_element(dstElemTy, acc, tb.i32_val(v));
     }
   }
@@ -777,54 +746,5 @@ LogicalResult convertScaledDot(triton::DotScaledOp op,
 
   rewriter.replaceOp(op, res);
   return success();
-}
-
-} // namespace
-
-LogicalResult convertWMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
-                          const TargetInfo &targetInfo,
-                          const LLVMTypeConverter *typeConverter,
-                          ConversionPatternRewriter &rewriter) {
-  auto rankedTType = [](Value tensor) {
-    return cast<RankedTensorType>(tensor.getType());
-  };
-
-  assert(isa<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding()) &&
-         isa<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding()) &&
-         "Both $a and %b should be DotOperand layout.");
-
-  auto cTensorTy = rankedTType(op.getC());
-  auto dTensorTy = rankedTType(op.getD());
-  assert(isa<AMDWmmaEncodingAttr>(cTensorTy.getEncoding()) &&
-         "Currently, we only support $c with a wmma layout.");
-
-  assert(cTensorTy.getShape()[0] == dTensorTy.getShape()[0] &&
-         cTensorTy.getShape()[1] == dTensorTy.getShape()[1] &&
-         "DotOp's $c operand should pass the same number of values as $d");
-
-  return convertDot(op, adaptor, targetInfo, rewriter, typeConverter);
-}
-
-LogicalResult convertScaledWMMA(triton::DotScaledOp op,
-                                triton::DotScaledOp::Adaptor adaptor,
-                                const TargetInfo &targetInfo,
-                                const LLVMTypeConverter *typeConverter,
-                                ConversionPatternRewriter &rewriter) {
-  assert(isa<mlir::triton::gpu::LinearEncodingTrait>(
-             op.getAScale().getType().getEncoding()) &&
-         isa<mlir::triton::gpu::LinearEncodingTrait>(
-             op.getBScale().getType().getEncoding()) &&
-         "Both LhsScale and RhsScale should be a LinearEncodingTrait.");
-
-  auto cTensorTy = op.getC().getType();
-  auto dTensorTy = op.getD().getType();
-  assert(isa<AMDWmmaEncodingAttr>(cTensorTy.getEncoding()) &&
-         "Currently, we only support C with a wmma layout.");
-
-  assert(cTensorTy.getShape()[0] == dTensorTy.getShape()[0] &&
-         cTensorTy.getShape()[1] == dTensorTy.getShape()[1] &&
-         "DotOp's C operand should pass the same number of values as D.");
-
-  return convertScaledDot(op, adaptor, targetInfo, rewriter, typeConverter);
 }
 } // namespace mlir::triton::AMD
