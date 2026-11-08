@@ -233,8 +233,9 @@ void TargetInfo::releaseBeforeAtomicBarrier(Location loc,
   // writes: within a workgroup they are already ordered (the waves share one
   // L1, or one L0 in CU mode). The release fence of a GPU or system scope
   // atomic waits only for the issuing wave's writes, so writes other waves
-  // still have in flight could become visible after the atomic.
-  if (scope == MemSyncScope::CTA)
+  // still have in flight could become visible after the atomic. In WGP mode
+  // the waves sit on two CUs, so even a workgroup-scope release must wait.
+  if (scope == MemSyncScope::CTA && !isWgpMode())
     return;
   switch (getISAFamily()) {
   case ISAFamily::CDNA2:
@@ -277,6 +278,23 @@ void TargetInfo::releaseBeforeAtomicBarrier(Location loc,
     return;
   }
   }
+}
+
+void TargetInfo::acquireAfterAtomicBarrier(Location loc,
+                                           RewriterBase &rewriter) const {
+  // The atomic's acquire invalidated only the issuing wave's L0. In WGP mode
+  // the other waves may run on the other CU, whose L0 can still hold stale
+  // lines; a workgroup acquire invalidates it (buffer_gl0_inv on gfx10/11,
+  // global_inv scope:SCOPE_SE on gfx12). With one L0 per workgroup the
+  // issuing wave's invalidate already covers every wave.
+  if (!isWgpMode())
+    return;
+  auto fence =
+      LLVM::FenceOp::create(rewriter, loc, LLVM::AtomicOrdering::acquire,
+                            /*syncscope=*/"workgroup");
+  Attribute globalMMRA =
+      rewriter.getAttr<LLVM::MMRATagAttr>("amdgpu-synchronize-as", "global");
+  fence->setDiscardableAttr(LLVM::LLVMDialect::getMmraAttrName(), globalMMRA);
 }
 
 void TargetInfo::clusterBarrier(Location loc, RewriterBase &rewriter,

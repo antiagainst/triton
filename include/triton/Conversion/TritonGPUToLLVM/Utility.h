@@ -803,6 +803,12 @@ void insertAtomicOrderingBarriers(Operation *op, MemSemantic memOrdering,
                                   MemSyncScope memScope, RewriterBase &rewriter,
                                   const TargetInfoBase &targetInfo);
 
+/// Extend an acquire atomic's ordering to every warp after the barrier that
+/// follows it or hands out its result. No-op for non-atomic or non-acquire ops.
+void acquireAfterAtomicBarrier(Operation *op, MemSemantic memOrdering,
+                               RewriterBase &rewriter,
+                               const TargetInfoBase &targetInfo);
+
 void shuffleFromCanonicalLane(Location loc, MutableArrayRef<Value> values,
                               uint32_t laneMask,
                               ConversionPatternRewriter &rewriter,

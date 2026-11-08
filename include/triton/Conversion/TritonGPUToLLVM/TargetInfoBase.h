@@ -56,6 +56,12 @@ public:
   // writes at `scope` here.
   virtual void releaseBeforeAtomicBarrier(Location loc, RewriterBase &rewriter,
                                           MemSyncScope scope) const {}
+  // Acquire in every thread/warp after the CTA or cluster barrier that follows
+  // an acquire atomic, or that hands out its result; the atomic itself may run
+  // in a single thread before that barrier. Targets whose acquire by one thread
+  // does not cover later global reads by other warps must acquire here.
+  virtual void acquireAfterAtomicBarrier(Location loc,
+                                         RewriterBase &rewriter) const {}
 
   // Emit a block/CTA level barrier that guarantees visibility for the
   // target address space
