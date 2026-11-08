@@ -91,7 +91,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
     // GFX11: llvm.atomicrmw add {{.*}} syncscope("agent") release
     // GFX12: rocdl.s.wait.storecnt 0
     // GFX12-NEXT: llvm.fence syncscope("workgroup") release
-    // GFX12-NEXT: rocdl.s.barrier.signal
+    // GFX12-NEXT: rocdl.s.barrier
     // GFX12: llvm.atomicrmw add {{.*}} syncscope("agent") release
     %0 = tt.atomic_rmw add, release, gpu, %ptr, %val : (!tt.ptr<i32>, i32) -> i32
     // The system-scope release does not repeat global_wb in every wave on
@@ -103,9 +103,13 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
     // GFX12-NEXT: llvm.fence syncscope("workgroup") release
     // GFX12: llvm.atomicrmw add {{.*}} release
     %1 = tt.atomic_rmw add, release, sys, %ptr, %val : (!tt.ptr<i32>, i32) -> i32
-    // GFX11-NOT: llvm.fence syncscope("agent")
-    // GFX12-NOT: rocdl.s.wait.storecnt
+    // These RUN lines use the default WGP mode, where a workgroup spans both
+    // CUs of a WGP, so a workgroup-scope release also waits in every wave.
+    // GFX11: llvm.fence syncscope("agent") release {llvm.mmra = [[$REL_GLOBAL]]}
+    // GFX11-NEXT: llvm.fence syncscope("workgroup") release
     // GFX11: llvm.atomicrmw add {{.*}} syncscope("workgroup") release
+    // GFX12: rocdl.s.wait.storecnt 0
+    // GFX12-NEXT: llvm.fence syncscope("workgroup") release
     // GFX12: llvm.atomicrmw add {{.*}} syncscope("workgroup") release
     %2 = tt.atomic_rmw add, release, cta, %ptr, %val : (!tt.ptr<i32>, i32) -> i32
     tt.return

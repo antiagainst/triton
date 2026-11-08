@@ -1291,6 +1291,25 @@ static bool atomicResultHasOrderingBarrier(Operation *op) {
          !triton::getAtomicResultShuffleMask(op->getResult(0));
 }
 
+void acquireAfterAtomicBarrier(Operation *op, MemSemantic memOrdering,
+                               RewriterBase &rewriter,
+                               const TargetInfoBase &targetInfo) {
+  if (memOrdering != MemSemantic::ACQUIRE &&
+      memOrdering != MemSemantic::ACQUIRE_RELEASE)
+    return;
+  if (triton::gpu::lookupNumWarps(op) > 1 || triton::gpu::lookupNumCTAs(op) > 1)
+    targetInfo.acquireAfterAtomicBarrier(op->getLoc(), rewriter);
+}
+
+// The ordering an atomic's result hand-off barrier has to extend to every warp.
+static MemSemantic getResultBarrierSemantic(Operation *op) {
+  if (auto atomic = dyn_cast<triton::AtomicOpInterface>(op))
+    return atomic.getMemSemantic();
+  if (auto poll = dyn_cast<triton::AtomicPollOp>(op))
+    return poll.getSem();
+  return MemSemantic::RELAXED;
+}
+
 void insertAtomicOrderingBarriers(Operation *op, MemSemantic memOrdering,
                                   MemSyncScope memScope, RewriterBase &rewriter,
                                   const TargetInfoBase &targetInfo) {
@@ -1319,6 +1338,7 @@ void insertAtomicOrderingBarriers(Operation *op, MemSemantic memOrdering,
   if (stages.afterMemoryEffects) {
     rewriter.setInsertionPointAfter(op);
     emitBarrier();
+    acquireAfterAtomicBarrier(op, memOrdering, rewriter, targetInfo);
   }
 }
 
@@ -1349,11 +1369,15 @@ Value broadcastScalarResult(Operation *op, Value resultVal,
   targetInfo.storeShared(rewriter, loc, smemBase, resultVal, threadPred);
   if (!triton::hasCrossCTAScratch(op)) {
     targetInfo.barrier(loc, rewriter, triton::gpu::AddrSpace::Local);
+    acquireAfterAtomicBarrier(op, getResultBarrierSemantic(op), rewriter,
+                              targetInfo);
     return targetInfo.loadShared(rewriter, loc, smemBase, valueElemTy,
                                  b.true_val());
   }
 
   targetInfo.clusterBarrier(loc, rewriter, op);
+  acquireAfterAtomicBarrier(op, getResultBarrierSemantic(op), rewriter,
+                            targetInfo);
   return targetInfo.loadDShared(rewriter, loc, smemBase, b.i32_val(0),
                                 valueElemTy, b.true_val());
 }
@@ -2286,6 +2310,8 @@ SmallVector<Value> broadcastTensorResult(Operation *op,
     targetInfo.clusterBarrier(loc, rewriter, op);
   else
     targetInfo.barrier(loc, rewriter, triton::gpu::AddrSpace::Local);
+  acquireAfterAtomicBarrier(op, getResultBarrierSemantic(op), rewriter,
+                            targetInfo);
 
   return lowerLdSt(loc, ctx, loadCvt, /*valsArray=*/{}, valueElemTy, smemBases,
                    /*paddingShifts=*/{}, /*affineOffset=*/b.i32_val(0),

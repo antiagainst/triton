@@ -21,6 +21,11 @@ public:
   }
 
   bool isCuMode() const { return cuMode; }
+  // Whether a workgroup's waves may run on both CUs of an RDNA WGP, each with
+  // its own L0 cache.
+  bool isWgpMode() const {
+    return mlir::triton::amdgpu::isRDNA(getISAFamily()) && !cuMode;
+  }
 
   llvm::AMDGPU::GPUKind getGPUKind() const;
 
@@ -66,6 +71,8 @@ public:
                triton::gpu::AddrSpace targets) const override;
   void releaseBeforeAtomicBarrier(Location loc, RewriterBase &rewriter,
                                   MemSyncScope scope) const override;
+  void acquireAfterAtomicBarrier(Location loc,
+                                 RewriterBase &rewriter) const override;
   void clusterBarrier(Location loc, RewriterBase &rewriter,
                       Operation *sourceOp) const override;
 

@@ -490,6 +490,7 @@ struct AtomicPollOpConversion
         targetInfo.barrier(loc, rewriter, AddrSpace::Local);
       else
         targetInfo.clusterBarrier(loc, rewriter, op);
+      acquireAfterAtomicBarrier(op, op.getSem(), rewriter, targetInfo);
     };
 
     // All elements have completed before the block continues, even when the
